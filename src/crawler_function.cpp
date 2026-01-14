@@ -577,7 +577,7 @@ static void CrawlerFunction(ClientContext &context, TableFunctionInput &data, Da
 
 			// Set crawl delay
 			if (domain_state.rules.HasCrawlDelay()) {
-				domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
+				domain_state.crawl_delay_seconds = domain_state.rules.GetEffectiveDelay();
 			} else {
 				domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
 			}
@@ -1085,7 +1085,7 @@ static std::vector<std::string> DiscoverSitemapUrls(ClientContext &context, Conn
 		domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, user_agent);
 		domain_state.has_crawl_delay = domain_state.rules.HasCrawlDelay();
 		if (domain_state.has_crawl_delay) {
-			domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
+			domain_state.crawl_delay_seconds = domain_state.rules.GetEffectiveDelay();
 		} else {
 			domain_state.crawl_delay_seconds = default_crawl_delay;
 		}
@@ -1358,7 +1358,7 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 				domain_state.has_crawl_delay = domain_state.rules.HasCrawlDelay();
 
 				if (domain_state.has_crawl_delay) {
-					domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
+					domain_state.crawl_delay_seconds = domain_state.rules.GetEffectiveDelay();
 				} else {
 					domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
 				}

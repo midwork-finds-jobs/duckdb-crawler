@@ -95,6 +95,25 @@ RobotsData RobotsParser::Parse(const std::string &robots_txt_content) {
 			continue;
 		}
 
+		// Check for Request-rate directive (format: n/m meaning n requests per m seconds)
+		if (StartsWithCaseInsensitive(line, "request-rate:") && current_rules) {
+			std::string rate_str = ExtractValue(line, 13);
+			try {
+				size_t slash_pos = rate_str.find('/');
+				if (slash_pos != std::string::npos) {
+					double n = std::stod(rate_str.substr(0, slash_pos));
+					double m = std::stod(rate_str.substr(slash_pos + 1));
+					if (n > 0 && m > 0) {
+						// Convert to seconds per request (m/n)
+						current_rules->request_rate = m / n;
+					}
+				}
+			} catch (...) {
+				// Ignore invalid request-rate values
+			}
+			continue;
+		}
+
 		// Check for Disallow directive
 		if (StartsWithCaseInsensitive(line, "disallow:") && current_rules) {
 			std::string path = ExtractValue(line, 9);
