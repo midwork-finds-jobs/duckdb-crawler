@@ -1,11 +1,13 @@
 #include "crawler_function.hpp"
 #include "robots_parser.hpp"
+#include "sitemap_parser.hpp"
 #include "http_client.hpp"
-#include "duckdb/main/extension_util.hpp"
-#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include <set>
 
 #include <atomic>
 #include <csignal>
@@ -14,6 +16,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <queue>
+#include <deque>
+#include <ctime>
+#include <cmath>
 
 namespace duckdb {
 
@@ -40,7 +45,7 @@ static void SignalHandler(int signum) {
 	}
 }
 
-// Domain state for rate limiting
+// Domain state for rate limiting and 429 handling
 struct DomainState {
 	std::chrono::steady_clock::time_point last_crawl_time;
 	double crawl_delay_seconds = 1.0;
@@ -49,7 +54,107 @@ struct DomainState {
 	int urls_crawled = 0;
 	int urls_failed = 0;
 	int urls_skipped = 0;
+
+	// 429 blocking
+	std::chrono::steady_clock::time_point blocked_until;
+	int consecutive_429s = 0;
+	bool has_crawl_delay = false;  // True if robots.txt specified crawl-delay
+
+	// Parallel tracking
+	int active_requests = 0;
 };
+
+// URL queue entry with retry tracking
+struct UrlQueueEntry {
+	std::string url;
+	int retry_count;
+	bool is_update;
+
+	UrlQueueEntry(const std::string &u, int rc, bool upd)
+	    : url(u), retry_count(rc), is_update(upd) {}
+};
+
+// Fibonacci backoff: 3, 3, 6, 9, 15, 24, 39, 63, 102, 165, 267...
+static int FibonacciBackoffSeconds(int n, int max_seconds) {
+	if (n <= 1) return 3;
+	int a = 3, b = 3;
+	for (int i = 2; i <= n; i++) {
+		int temp = a + b;
+		a = b;
+		b = temp;
+		if (b > max_seconds) return max_seconds;
+	}
+	return std::min(b, max_seconds);
+}
+
+// Parse HTTP date format: "Tue, 14 Jan 2025 12:00:00 GMT"
+// Returns empty string if parsing fails
+static std::string ParseAndValidateServerDate(const std::string &server_date) {
+	if (server_date.empty()) {
+		return "";
+	}
+
+	// Get current time
+	auto now = std::chrono::system_clock::now();
+	auto now_time_t = std::chrono::system_clock::to_time_t(now);
+
+	// Parse HTTP date - format: "Day, DD Mon YYYY HH:MM:SS GMT"
+	struct tm tm_parsed = {};
+	const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+	// Find components manually since strptime may not be available
+	// Expected format: "Tue, 14 Jan 2025 12:00:00 GMT"
+	int day, year, hour, min, sec;
+	char month_str[4] = {0};
+
+	int parsed = sscanf(server_date.c_str(), "%*[^,], %d %3s %d %d:%d:%d",
+	                    &day, month_str, &year, &hour, &min, &sec);
+
+	if (parsed != 6) {
+		return "";  // Failed to parse
+	}
+
+	// Convert month string to number
+	int month = -1;
+	for (int i = 0; i < 12; i++) {
+		if (strncmp(month_str, months[i], 3) == 0) {
+			month = i;
+			break;
+		}
+	}
+
+	if (month < 0) {
+		return "";  // Invalid month
+	}
+
+	// Build tm struct
+	tm_parsed.tm_year = year - 1900;
+	tm_parsed.tm_mon = month;
+	tm_parsed.tm_mday = day;
+	tm_parsed.tm_hour = hour;
+	tm_parsed.tm_min = min;
+	tm_parsed.tm_sec = sec;
+
+	// Convert to time_t (assuming GMT)
+	time_t server_time = timegm(&tm_parsed);
+	if (server_time == -1) {
+		return "";
+	}
+
+	// Check if server time is within 15 minutes of local time
+	double diff_seconds = difftime(server_time, now_time_t);
+	if (std::abs(diff_seconds) > 15 * 60) {
+		// Server clock is off by more than 15 minutes - don't trust it
+		return "";
+	}
+
+	// Server time is trustworthy - format as ISO timestamp for DuckDB
+	char buf[32];
+	struct tm *gmt = gmtime(&server_time);
+	strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmt);
+	return std::string(buf);
+}
 
 // Crawl result for a single URL
 struct CrawlResult {
@@ -282,8 +387,8 @@ static void CrawlerFunction(ClientContext &context, TableFunctionInput &data, Da
 			domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, bind_data.user_agent);
 
 			// Set crawl delay
-			if (domain_state.rules.crawl_delay.has_value()) {
-				domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay.value();
+			if (domain_state.rules.HasCrawlDelay()) {
+				domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
 			} else {
 				domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
 			}
@@ -376,7 +481,8 @@ static void CrawlerFunction(ClientContext &context, TableFunctionInput &data, Da
 
 void RegisterCrawlerFunction(ExtensionLoader &loader) {
 	TableFunction crawl_func("crawl_urls", {LogicalType::LIST(LogicalType::VARCHAR)}, CrawlerFunction, CrawlerBind,
-	                         CrawlerInitGlobal, CrawlerInitLocal);
+	                         CrawlerInitGlobal);
+	crawl_func.init_local = CrawlerInitLocal;
 
 	// Named parameters
 	crawl_func.named_parameters["user_agent"] = LogicalType::VARCHAR;
@@ -387,7 +493,709 @@ void RegisterCrawlerFunction(ExtensionLoader &loader) {
 	crawl_func.named_parameters["respect_robots_txt"] = LogicalType::BOOLEAN;
 	crawl_func.named_parameters["log_skipped"] = LogicalType::BOOLEAN;
 
-	ExtensionUtil::RegisterFunction(loader, crawl_func);
+	loader.RegisterFunction(crawl_func);
+}
+
+//===--------------------------------------------------------------------===//
+// crawl_into_internal - Used by CRAWL INTO parser extension
+//===--------------------------------------------------------------------===//
+
+struct CrawlIntoBindData : public TableFunctionData {
+	int crawl_mode = 0;           // 0=URLS, 1=SITES
+	std::string source_query;
+	std::string target_table;
+	std::string user_agent;
+	double default_crawl_delay = 1.0;
+	double min_crawl_delay = 0.0;
+	double max_crawl_delay = 60.0;
+	int timeout_seconds = 30;
+	bool respect_robots_txt = true;
+	bool log_skipped = true;
+	std::string url_filter;       // LIKE pattern for filtering URLs in SITES mode
+	double sitemap_cache_hours = 24.0;  // Hours to cache sitemap discovery results
+	bool update_stale = false;    // Re-crawl stale URLs based on sitemap lastmod/changefreq
+	int max_retry_backoff_seconds = 600;   // Max Fibonacci backoff for 429/5XX/timeout
+	int max_parallel_per_domain = 8;       // Max concurrent requests per domain (if no crawl-delay)
+};
+
+struct CrawlIntoGlobalState : public GlobalTableFunctionState {
+	std::mutex mutex;
+	bool executed = false;
+	int64_t rows_inserted = 0;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+};
+
+static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	auto bind_data = make_uniq<CrawlIntoBindData>();
+
+	// Get parameters from positional arguments (set by PlanCrawl)
+	// Order: mode, source_query, target_table, user_agent, delays..., url_filter, sitemap_cache_hours, update_stale, max_retry_backoff_seconds, max_parallel_per_domain
+	if (input.inputs.size() >= 15) {
+		bind_data->crawl_mode = input.inputs[0].GetValue<int32_t>();
+		bind_data->source_query = StringValue::Get(input.inputs[1]);
+		bind_data->target_table = StringValue::Get(input.inputs[2]);
+		bind_data->user_agent = StringValue::Get(input.inputs[3]);
+		bind_data->default_crawl_delay = input.inputs[4].GetValue<double>();
+		bind_data->min_crawl_delay = input.inputs[5].GetValue<double>();
+		bind_data->max_crawl_delay = input.inputs[6].GetValue<double>();
+		bind_data->timeout_seconds = input.inputs[7].GetValue<int>();
+		bind_data->respect_robots_txt = input.inputs[8].GetValue<bool>();
+		bind_data->log_skipped = input.inputs[9].GetValue<bool>();
+		bind_data->url_filter = StringValue::Get(input.inputs[10]);
+		bind_data->sitemap_cache_hours = input.inputs[11].GetValue<double>();
+		bind_data->update_stale = input.inputs[12].GetValue<bool>();
+		bind_data->max_retry_backoff_seconds = input.inputs[13].GetValue<int>();
+		bind_data->max_parallel_per_domain = input.inputs[14].GetValue<int>();
+	} else {
+		throw BinderException("crawl_into_internal: insufficient parameters (expected 15, got " +
+		                      std::to_string(input.inputs.size()) + ")");
+	}
+
+	// Return schema: just count of rows changed
+	names.emplace_back("Count");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	return std::move(bind_data);
+}
+
+static unique_ptr<GlobalTableFunctionState> CrawlIntoInitGlobal(ClientContext &context,
+                                                                  TableFunctionInitInput &input) {
+	auto state = make_uniq<CrawlIntoGlobalState>();
+
+	// Reset signal state
+	g_shutdown_requested = false;
+	g_sigint_count = 0;
+
+	// Install signal handler
+	std::signal(SIGINT, SignalHandler);
+
+	return std::move(state);
+}
+
+// Helper: Check if URL matches LIKE pattern (simple SQL LIKE implementation)
+static bool MatchesLikePattern(const std::string &url, const std::string &pattern) {
+	if (pattern.empty()) {
+		return true;
+	}
+
+	// Convert SQL LIKE pattern to simple matching
+	// % = any characters, _ = single character
+	size_t url_pos = 0;
+	size_t pat_pos = 0;
+	size_t url_len = url.length();
+	size_t pat_len = pattern.length();
+
+	size_t star_pos = std::string::npos;
+	size_t match_pos = 0;
+
+	while (url_pos < url_len) {
+		if (pat_pos < pat_len && (pattern[pat_pos] == url[url_pos] || pattern[pat_pos] == '_')) {
+			url_pos++;
+			pat_pos++;
+		} else if (pat_pos < pat_len && pattern[pat_pos] == '%') {
+			star_pos = pat_pos;
+			match_pos = url_pos;
+			pat_pos++;
+		} else if (star_pos != std::string::npos) {
+			pat_pos = star_pos + 1;
+			match_pos++;
+			url_pos = match_pos;
+		} else {
+			return false;
+		}
+	}
+
+	while (pat_pos < pat_len && pattern[pat_pos] == '%') {
+		pat_pos++;
+	}
+
+	return pat_pos == pat_len;
+}
+
+// Helper: Ensure sitemap cache table exists
+static void EnsureSitemapCacheTable(Connection &conn) {
+	// Create table with all columns including metadata
+	conn.Query("CREATE TABLE IF NOT EXISTS _crawl_sitemap_cache ("
+	           "hostname VARCHAR, "
+	           "url VARCHAR, "
+	           "lastmod TIMESTAMP, "
+	           "changefreq VARCHAR, "
+	           "priority DOUBLE, "
+	           "discovered_at TIMESTAMP DEFAULT NOW(), "
+	           "PRIMARY KEY (hostname, url))");
+
+	// Migration: add columns if they don't exist (for existing tables)
+	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS lastmod TIMESTAMP");
+	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS changefreq VARCHAR");
+	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS priority DOUBLE");
+}
+
+// Helper: Convert changefreq to hours threshold
+static double ChangefreqToHours(const std::string &changefreq) {
+	if (changefreq.empty()) {
+		return 168.0;  // Default: weekly
+	}
+	std::string freq = StringUtil::Lower(changefreq);
+	if (freq == "always") return 0.0;
+	if (freq == "hourly") return 1.0;
+	if (freq == "daily") return 24.0;
+	if (freq == "weekly") return 168.0;
+	if (freq == "monthly") return 720.0;
+	if (freq == "yearly") return 8760.0;
+	if (freq == "never") return 87600.0;  // ~10 years
+	return 168.0;  // Default: weekly
+}
+
+// Helper: Check if URL is stale based on sitemap lastmod or changefreq
+// Returns true if the URL should be re-crawled
+static bool IsUrlStale(Connection &conn, const std::string &url, const std::string &target_table) {
+	// Get crawled_at from target table
+	auto crawled_result = conn.Query(
+	    "SELECT crawled_at FROM " + target_table + " WHERE url = $1", url);
+
+	if (crawled_result->HasError()) {
+		return false;  // Can't determine, assume not stale
+	}
+
+	auto crawled_chunk = crawled_result->Fetch();
+	if (!crawled_chunk || crawled_chunk->size() == 0) {
+		return false;  // URL not found in target, not a stale update
+	}
+
+	auto crawled_val = crawled_chunk->GetValue(0, 0);
+	if (crawled_val.IsNull()) {
+		return true;  // No crawled_at, consider stale
+	}
+
+	// Get sitemap metadata for this URL
+	auto cache_result = conn.Query(
+	    "SELECT lastmod, changefreq FROM _crawl_sitemap_cache WHERE url = $1", url);
+
+	if (cache_result->HasError()) {
+		return false;
+	}
+
+	auto cache_chunk = cache_result->Fetch();
+	if (!cache_chunk || cache_chunk->size() == 0) {
+		return false;  // No sitemap metadata
+	}
+
+	auto lastmod_val = cache_chunk->GetValue(0, 0);
+	auto changefreq_val = cache_chunk->GetValue(1, 0);
+
+	// If lastmod exists and is after crawled_at, URL is stale
+	if (!lastmod_val.IsNull()) {
+		// Compare timestamps
+		auto compare_result = conn.Query(
+		    "SELECT $1::TIMESTAMP > $2::TIMESTAMP",
+		    lastmod_val, crawled_val);
+		if (!compare_result->HasError()) {
+			auto cmp_chunk = compare_result->Fetch();
+			if (cmp_chunk && cmp_chunk->size() > 0) {
+				auto cmp_val = cmp_chunk->GetValue(0, 0);
+				if (!cmp_val.IsNull() && cmp_val.GetValue<bool>()) {
+					return true;  // lastmod > crawled_at
+				}
+			}
+		}
+	}
+
+	// Fall back to changefreq-based staleness
+	std::string changefreq = changefreq_val.IsNull() ? "" : StringValue::Get(changefreq_val);
+	double hours_threshold = ChangefreqToHours(changefreq);
+
+	// Check if enough time has passed since last crawl
+	auto age_result = conn.Query(
+	    "SELECT EXTRACT(EPOCH FROM (NOW() - $1::TIMESTAMP)) / 3600.0 > $2",
+	    crawled_val, hours_threshold);
+
+	if (!age_result->HasError()) {
+		auto age_chunk = age_result->Fetch();
+		if (age_chunk && age_chunk->size() > 0) {
+			auto age_val = age_chunk->GetValue(0, 0);
+			if (!age_val.IsNull() && age_val.GetValue<bool>()) {
+				return true;  // Age exceeds threshold
+			}
+		}
+	}
+
+	return false;
+}
+
+// Helper: Get cached sitemap URLs if still valid
+static std::vector<std::string> GetCachedSitemapUrls(Connection &conn, const std::string &hostname,
+                                                      double cache_hours) {
+	std::vector<std::string> urls;
+
+	auto result = conn.Query(
+	    "SELECT url FROM _crawl_sitemap_cache "
+	    "WHERE hostname = $1 AND discovered_at > NOW() - INTERVAL '" + std::to_string(cache_hours) + " hours'",
+	    hostname);
+
+	if (!result->HasError()) {
+		while (auto chunk = result->Fetch()) {
+			for (idx_t i = 0; i < chunk->size(); i++) {
+				auto val = chunk->GetValue(0, i);
+				if (!val.IsNull()) {
+					urls.push_back(StringValue::Get(val));
+				}
+			}
+		}
+	}
+
+	return urls;
+}
+
+// Helper: Cache discovered sitemap URLs with metadata
+static void CacheSitemapUrls(Connection &conn, const std::string &hostname,
+                              const std::vector<SitemapEntry> &entries) {
+	// Clear old cache for this hostname
+	conn.Query("DELETE FROM _crawl_sitemap_cache WHERE hostname = $1", hostname);
+
+	// Insert entries with metadata
+	for (const auto &entry : entries) {
+		// Parse lastmod - DuckDB handles ISO8601 and date-only formats
+		Value lastmod_val = entry.lastmod.empty() ? Value() : Value(entry.lastmod);
+		Value changefreq_val = entry.changefreq.empty() ? Value() : Value(entry.changefreq);
+		Value priority_val = entry.priority.empty() ? Value() : Value(std::stod(entry.priority));
+
+		conn.Query("INSERT INTO _crawl_sitemap_cache (hostname, url, lastmod, changefreq, priority) "
+		           "VALUES ($1, $2, $3, $4, $5)",
+		           hostname, entry.loc, lastmod_val, changefreq_val, priority_val);
+	}
+}
+
+// Helper: Discover sitemaps for a hostname (with caching)
+static std::vector<std::string> DiscoverSitemapUrls(ClientContext &context, Connection &conn,
+                                                     const std::string &hostname,
+                                                     const std::string &user_agent,
+                                                     std::unordered_map<std::string, DomainState> &domain_states,
+                                                     double default_crawl_delay, double cache_hours) {
+	// Check cache first
+	EnsureSitemapCacheTable(conn);
+	auto cached_urls = GetCachedSitemapUrls(conn, hostname, cache_hours);
+	if (!cached_urls.empty()) {
+		return cached_urls;
+	}
+
+	// No valid cache - discover sitemaps
+	std::vector<SitemapEntry> sitemap_entries;  // Keep full metadata
+	std::set<std::string> processed_sitemaps;
+	std::vector<std::string> to_process;
+
+	RetryConfig retry_config;
+	retry_config.max_retries = 2;
+
+	// Step 1: Try robots.txt for Sitemap directives
+	std::string robots_url = "https://" + hostname + "/robots.txt";
+	auto robots_response = HttpClient::Fetch(context, robots_url, retry_config, user_agent);
+
+	if (robots_response.success) {
+		auto sitemaps_from_robots = SitemapParser::ExtractSitemapsFromRobotsTxt(robots_response.body);
+		for (auto &sm : sitemaps_from_robots) {
+			to_process.push_back(sm);
+		}
+
+		// Also parse robots rules for rate limiting
+		auto &domain_state = domain_states[hostname];
+		auto robots_data = RobotsParser::Parse(robots_response.body);
+		domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, user_agent);
+		if (domain_state.rules.HasCrawlDelay()) {
+			domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
+		} else {
+			domain_state.crawl_delay_seconds = default_crawl_delay;
+		}
+		domain_state.robots_fetched = true;
+	}
+
+	// Step 2: If no sitemaps found, bruteforce common locations
+	if (to_process.empty()) {
+		auto common_paths = SitemapParser::GetCommonSitemapPaths();
+		for (auto &path : common_paths) {
+			to_process.push_back("https://" + hostname + path);
+		}
+	}
+
+	// Step 3: Fetch and parse sitemaps (handle sitemap indexes recursively)
+	while (!to_process.empty() && !g_shutdown_requested) {
+		std::string sitemap_url = to_process.back();
+		to_process.pop_back();
+
+		if (processed_sitemaps.count(sitemap_url)) {
+			continue;
+		}
+		processed_sitemaps.insert(sitemap_url);
+
+		auto response = HttpClient::Fetch(context, sitemap_url, retry_config, user_agent);
+		if (!response.success || response.status_code != 200) {
+			continue;
+		}
+
+		auto sitemap_data = SitemapParser::Parse(response.body);
+
+		if (sitemap_data.is_index) {
+			// Sitemap index - add nested sitemaps to process
+			for (auto &nested_url : sitemap_data.sitemap_urls) {
+				if (!processed_sitemaps.count(nested_url)) {
+					to_process.push_back(nested_url);
+				}
+			}
+		} else {
+			// Regular sitemap - keep full entry with metadata
+			for (auto &entry : sitemap_data.urls) {
+				sitemap_entries.push_back(entry);
+			}
+		}
+	}
+
+	// Cache discovered entries with metadata for future runs
+	if (!sitemap_entries.empty()) {
+		CacheSitemapUrls(conn, hostname, sitemap_entries);
+	}
+
+	// Return just URLs for compatibility
+	std::vector<std::string> urls;
+	for (const auto &entry : sitemap_entries) {
+		urls.push_back(entry.loc);
+	}
+	return urls;
+}
+
+static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &bind_data = data.bind_data->CastNoConst<CrawlIntoBindData>();
+	auto &global_state = data.global_state->Cast<CrawlIntoGlobalState>();
+
+	std::lock_guard<std::mutex> lock(global_state.mutex);
+
+	if (global_state.executed) {
+		output.SetCardinality(0);
+		return;
+	}
+	global_state.executed = true;
+
+	Connection conn(*context.db);
+
+	// Execute source query to get URLs or hostnames
+	auto query_result = conn.Query(bind_data.source_query);
+	if (query_result->HasError()) {
+		throw IOException("CRAWL source query error: " + query_result->GetError());
+	}
+
+	// Collect values from first column
+	std::vector<std::string> source_values;
+	while (auto chunk = query_result->Fetch()) {
+		for (idx_t i = 0; i < chunk->size(); i++) {
+			auto val = chunk->GetValue(0, i);
+			if (!val.IsNull()) {
+				source_values.push_back(StringValue::Get(val));
+			}
+		}
+	}
+
+	if (source_values.empty()) {
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(0));
+		return;
+	}
+
+	// Prepare domain states for rate limiting
+	std::unordered_map<std::string, DomainState> domain_states;
+
+	// Determine URLs to crawl based on mode
+	std::vector<std::string> urls;
+
+	if (bind_data.crawl_mode == 1) {  // SITES mode
+		// source_values are hostnames - discover sitemaps and extract URLs
+		for (const auto &hostname : source_values) {
+			if (g_shutdown_requested) {
+				break;
+			}
+
+			auto discovered_urls = DiscoverSitemapUrls(context, conn, hostname, bind_data.user_agent,
+			                                           domain_states, bind_data.default_crawl_delay,
+			                                           bind_data.sitemap_cache_hours);
+
+			// Apply URL filter if specified
+			for (const auto &url : discovered_urls) {
+				if (bind_data.url_filter.empty() || MatchesLikePattern(url, bind_data.url_filter)) {
+					urls.push_back(url);
+				}
+			}
+		}
+	} else {
+		// URLS mode - source_values are already URLs
+		urls = std::move(source_values);
+	}
+
+	if (urls.empty()) {
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(0));
+		return;
+	}
+
+	// Get existing URLs from target table
+	std::set<std::string> existing_urls;
+	auto existing_query = conn.Query("SELECT DISTINCT url FROM " + bind_data.target_table);
+	if (!existing_query->HasError()) {
+		while (auto chunk = existing_query->Fetch()) {
+			for (idx_t i = 0; i < chunk->size(); i++) {
+				auto val = chunk->GetValue(0, i);
+				if (!val.IsNull()) {
+					existing_urls.insert(StringValue::Get(val));
+				}
+			}
+		}
+	}
+
+	// Build URL queue: new URLs first, then stale URLs (if update_stale enabled)
+	std::deque<UrlQueueEntry> url_queue;
+
+	for (const auto &url : urls) {
+		if (existing_urls.find(url) == existing_urls.end()) {
+			// New URL - add first (priority)
+			url_queue.push_back({url, 0, false});
+		}
+	}
+
+	// If update_stale enabled, check existing URLs for staleness and add them after new URLs
+	if (bind_data.update_stale && !existing_urls.empty()) {
+		// Ensure sitemap cache exists for staleness checks
+		EnsureSitemapCacheTable(conn);
+
+		for (const auto &url : urls) {
+			if (existing_urls.find(url) != existing_urls.end()) {
+				// Existing URL - check if stale
+				if (IsUrlStale(conn, url, bind_data.target_table)) {
+					url_queue.push_back({url, 0, true});  // is_update = true
+				}
+			}
+		}
+	}
+
+	if (url_queue.empty()) {
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(0));
+		return;
+	}
+
+	int64_t rows_changed = 0;
+
+	// Process URL queue with retry logic
+	while (!url_queue.empty() && !g_shutdown_requested) {
+		auto entry = url_queue.front();
+		url_queue.pop_front();
+
+		std::string domain = ExtractDomain(entry.url);
+		std::string path = ExtractPath(entry.url);
+
+		auto &domain_state = domain_states[domain];
+
+		// Check if domain is blocked (429/5XX backoff)
+		auto now = std::chrono::steady_clock::now();
+		if (domain_state.blocked_until > now) {
+			// Domain is blocked - re-queue if under retry limit
+			if (entry.retry_count < 5) {
+				entry.retry_count++;
+				url_queue.push_back(entry);
+			}
+			// If we've only got blocked URLs left, wait for the shortest block to expire
+			if (url_queue.size() == 1 || (url_queue.empty() && entry.retry_count < 5)) {
+				auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+				    domain_state.blocked_until - now).count();
+				if (wait_ms > 0 && wait_ms < 60000) {  // Wait max 60s at a time
+					std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
+				}
+			}
+			continue;
+		}
+
+		// Fetch robots.txt if needed (may already be fetched in SITES mode)
+		if (bind_data.respect_robots_txt && !domain_state.robots_fetched) {
+			std::string robots_url = "https://" + domain + "/robots.txt";
+			RetryConfig retry_config;
+
+			auto response = HttpClient::Fetch(context, robots_url, retry_config, bind_data.user_agent);
+
+			if (response.success) {
+				auto robots_data = RobotsParser::Parse(response.body);
+				domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, bind_data.user_agent);
+
+				// Track if crawl-delay was specified (affects parallel request limit)
+				domain_state.has_crawl_delay = domain_state.rules.HasCrawlDelay();
+
+				if (domain_state.has_crawl_delay) {
+					domain_state.crawl_delay_seconds = domain_state.rules.crawl_delay;
+				} else {
+					domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
+				}
+
+				domain_state.crawl_delay_seconds = std::max(domain_state.crawl_delay_seconds, bind_data.min_crawl_delay);
+				domain_state.crawl_delay_seconds = std::min(domain_state.crawl_delay_seconds, bind_data.max_crawl_delay);
+			} else {
+				domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
+				domain_state.has_crawl_delay = false;  // No robots.txt = allow parallel
+			}
+
+			domain_state.robots_fetched = true;
+		}
+
+		// Check robots.txt rules
+		if (bind_data.respect_robots_txt && !RobotsParser::IsAllowed(domain_state.rules, path)) {
+			if (bind_data.log_skipped) {
+				auto insert_sql = "INSERT INTO " + bind_data.target_table +
+				                  " (url, domain, http_status, body, content_type, elapsed_ms, crawled_at, error) VALUES ($1, $2, $3, NULL, NULL, 0, NOW(), $4)";
+				auto insert_result = conn.Query(insert_sql, entry.url, domain, -1, "robots.txt disallow");
+				if (!insert_result->HasError()) {
+					rows_changed++;
+				}
+			}
+			continue;
+		}
+
+		// Check parallel limit for domains without crawl-delay
+		if (!domain_state.has_crawl_delay) {
+			if (domain_state.active_requests >= bind_data.max_parallel_per_domain) {
+				url_queue.push_back(entry);  // Re-queue, try later
+				continue;
+			}
+			domain_state.active_requests++;
+		} else {
+			// Wait for crawl delay (serial mode for domains with crawl-delay)
+			now = std::chrono::steady_clock::now();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - domain_state.last_crawl_time).count();
+			auto required_delay_ms = static_cast<int64_t>(domain_state.crawl_delay_seconds * 1000);
+
+			if (elapsed < required_delay_ms) {
+				auto wait_time = required_delay_ms - elapsed;
+				std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
+			}
+		}
+
+		if (g_shutdown_requested) {
+			if (!domain_state.has_crawl_delay) {
+				domain_state.active_requests--;
+			}
+			break;
+		}
+
+		// Fetch URL
+		auto fetch_start = std::chrono::steady_clock::now();
+		RetryConfig retry_config;
+		auto response = HttpClient::Fetch(context, entry.url, retry_config, bind_data.user_agent);
+		auto fetch_end = std::chrono::steady_clock::now();
+		auto fetch_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fetch_end - fetch_start).count();
+
+		domain_state.last_crawl_time = fetch_end;
+
+		// Decrement active requests for parallel mode
+		if (!domain_state.has_crawl_delay) {
+			domain_state.active_requests--;
+		}
+
+		// Check for retryable errors (429, 5XX, network errors)
+		bool is_retryable = (response.status_code == 429 ||
+		                     (response.status_code >= 500 && response.status_code <= 504) ||
+		                     response.status_code <= 0);
+
+		if (is_retryable) {
+			// Calculate backoff using Fibonacci
+			domain_state.consecutive_429s++;
+
+			int backoff_seconds;
+			if (response.status_code == 429 && !response.retry_after.empty()) {
+				// Use Retry-After header if provided
+				backoff_seconds = HttpClient::ParseRetryAfter(response.retry_after) / 1000;
+				if (backoff_seconds <= 0) {
+					backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
+					                                           bind_data.max_retry_backoff_seconds);
+				}
+			} else {
+				backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
+				                                           bind_data.max_retry_backoff_seconds);
+			}
+
+			// Block domain
+			domain_state.blocked_until = std::chrono::steady_clock::now() +
+			                              std::chrono::seconds(backoff_seconds);
+
+			// Re-queue URL if under retry limit
+			if (entry.retry_count < 5) {
+				entry.retry_count++;
+				url_queue.push_back(entry);
+			}
+			continue;
+		}
+
+		// Success - clear consecutive error count
+		domain_state.consecutive_429s = 0;
+
+		// Get timestamp - prefer server Date header if valid (within 15 min of local time)
+		std::string validated_date = ParseAndValidateServerDate(response.server_date);
+		std::string timestamp_expr = validated_date.empty() ? "NOW()" : ("'" + validated_date + "'::TIMESTAMP");
+
+		if (entry.is_update) {
+			// UPDATE existing row
+			auto update_sql = "UPDATE " + bind_data.target_table +
+			                  " SET domain = $2, http_status = $3, body = $4, content_type = $5, "
+			                  "elapsed_ms = $6, crawled_at = " + timestamp_expr + ", error = $7 "
+			                  "WHERE url = $1";
+
+			auto update_result = conn.Query(update_sql, entry.url, domain, response.status_code,
+			                                 response.body.empty() ? Value() : Value(response.body),
+			                                 response.content_type.empty() ? Value() : Value(response.content_type),
+			                                 fetch_elapsed_ms,
+			                                 response.error.empty() ? Value() : Value(response.error));
+
+			if (!update_result->HasError()) {
+				rows_changed++;
+			}
+		} else {
+			// INSERT new row
+			auto insert_sql = "INSERT INTO " + bind_data.target_table +
+			                  " (url, domain, http_status, body, content_type, elapsed_ms, crawled_at, error) VALUES ($1, $2, $3, $4, $5, $6, " + timestamp_expr + ", $7)";
+
+			auto insert_result = conn.Query(insert_sql, entry.url, domain, response.status_code,
+			                                 response.body.empty() ? Value() : Value(response.body),
+			                                 response.content_type.empty() ? Value() : Value(response.content_type),
+			                                 fetch_elapsed_ms,
+			                                 response.error.empty() ? Value() : Value(response.error));
+
+			if (!insert_result->HasError()) {
+				rows_changed++;
+			}
+		}
+	}
+
+	global_state.rows_inserted = rows_changed;
+
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::BIGINT(rows_changed));
+}
+
+void RegisterCrawlIntoFunction(ExtensionLoader &loader) {
+	TableFunction crawl_into_func("crawl_into_internal",
+	                               {LogicalType::INTEGER,  // mode (0=URLS, 1=SITES)
+	                                LogicalType::VARCHAR,  // source_query
+	                                LogicalType::VARCHAR,  // target_table
+	                                LogicalType::VARCHAR,  // user_agent
+	                                LogicalType::DOUBLE,   // default_crawl_delay
+	                                LogicalType::DOUBLE,   // min_crawl_delay
+	                                LogicalType::DOUBLE,   // max_crawl_delay
+	                                LogicalType::INTEGER,  // timeout_seconds
+	                                LogicalType::BOOLEAN,  // respect_robots_txt
+	                                LogicalType::BOOLEAN,  // log_skipped
+	                                LogicalType::VARCHAR,  // url_filter
+	                                LogicalType::DOUBLE,   // sitemap_cache_hours
+	                                LogicalType::BOOLEAN,  // update_stale
+	                                LogicalType::INTEGER,  // max_retry_backoff_seconds
+	                                LogicalType::INTEGER}, // max_parallel_per_domain
+	                               CrawlIntoFunction, CrawlIntoBind, CrawlIntoInitGlobal);
+
+	loader.RegisterFunction(crawl_into_func);
 }
 
 } // namespace duckdb

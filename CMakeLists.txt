@@ -16,6 +16,8 @@ set(EXTENSION_SOURCES
     src/crawler_function.cpp
     src/robots_parser.cpp
     src/http_client.cpp
+    src/crawl_parser.cpp
+    src/sitemap_parser.cpp
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

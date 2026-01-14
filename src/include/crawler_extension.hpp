@@ -4,6 +4,8 @@
 
 namespace duckdb {
 
+class ExtensionLoader;
+
 class CrawlerExtension : public Extension {
 public:
 	void Load(ExtensionLoader &loader) override;

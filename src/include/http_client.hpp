@@ -11,6 +11,7 @@ struct HttpResponse {
 	std::string body;
 	std::string content_type;
 	std::string retry_after;
+	std::string server_date;  // Date header from server
 	std::string error;
 	bool success = false;
 };
@@ -26,11 +27,11 @@ class HttpClient {
 public:
 	static HttpResponse Fetch(ClientContext &context, const std::string &url, const RetryConfig &config,
 	                          const std::string &user_agent = "");
+	static int ParseRetryAfter(const std::string &retry_after);
 
 private:
 	static HttpResponse ExecuteHttpGet(DatabaseInstance &db, const std::string &url, const std::string &user_agent);
 	static bool IsRetryable(int status_code);
-	static int ParseRetryAfter(const std::string &retry_after);
 };
 
 } // namespace duckdb

@@ -2,10 +2,12 @@
 
 #include "crawler_extension.hpp"
 #include "crawler_function.hpp"
+#include "crawl_parser.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/main/connection.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/parser/parser_extension.hpp"
 
 namespace duckdb {
 
@@ -25,23 +27,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::DOUBLE,
 	                          Value(1.0));
 
+	// Try to install and load http_request from community (optional)
 	Connection conn(db);
-
-	// Install and load http_request from community
 	auto install_result = conn.Query("INSTALL http_request FROM community");
-	if (install_result->HasError()) {
-		throw IOException("Crawler extension requires http_request extension. Failed to install: " +
-		                  install_result->GetError());
-	}
-
-	auto load_result = conn.Query("LOAD http_request");
-	if (load_result->HasError()) {
-		throw IOException("Crawler extension requires http_request extension. Failed to load: " +
-		                  load_result->GetError());
+	if (!install_result->HasError()) {
+		conn.Query("LOAD http_request");
 	}
 
 	// Register crawl_urls() table function
 	RegisterCrawlerFunction(loader);
+
+	// Register crawl_into_internal() table function for CRAWL INTO syntax
+	RegisterCrawlIntoFunction(loader);
+
+	// Register CRAWL parser extension
+	ParserExtension parser_ext;
+	parser_ext.parse_function = CrawlParserExtension::ParseCrawl;
+	parser_ext.plan_function = CrawlParserExtension::PlanCrawl;
+	config.parser_extensions.push_back(std::move(parser_ext));
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {
@@ -67,4 +70,5 @@ extern "C" {
 DUCKDB_CPP_EXTENSION_ENTRY(crawler, loader) {
 	duckdb::LoadInternal(loader);
 }
+
 }

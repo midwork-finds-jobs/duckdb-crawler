@@ -3,15 +3,16 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
-#include <optional>
 
 namespace duckdb {
 
 // Rules for a specific user-agent
 struct RobotsRules {
-	std::optional<double> crawl_delay;
+	double crawl_delay = -1.0;  // -1 means not set
 	std::vector<std::string> disallow;
 	std::vector<std::string> allow;
+
+	bool HasCrawlDelay() const { return crawl_delay >= 0; }
 };
 
 // Parsed robots.txt content

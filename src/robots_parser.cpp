@@ -86,7 +86,9 @@ RobotsData RobotsParser::Parse(const std::string &robots_txt_content) {
 			std::string delay_str = ExtractValue(line, 12);
 			try {
 				double delay = std::stod(delay_str);
-				current_rules->crawl_delay = delay;
+				if (delay >= 0) {
+					current_rules->crawl_delay = delay;
+				}
 			} catch (...) {
 				// Ignore invalid crawl-delay values
 			}
