@@ -1092,6 +1092,84 @@ static void RemoveFromQueue(Connection &conn, const std::string &target_table, c
 	conn.Query("DELETE FROM \"" + queue_table + "\" WHERE url = $1", url);
 }
 
+// Result struct for batch inserts (different from CrawlResult used by crawl() function)
+struct BatchCrawlEntry {
+	std::string url;
+	std::string surt_key;
+	std::string domain;
+	int status_code;
+	std::string body;
+	std::string content_type;
+	int64_t elapsed_ms;
+	std::string timestamp_expr;  // SQL expression for timestamp
+	std::string error;
+	std::string etag;
+	std::string last_modified;
+	std::string content_hash;
+	bool is_update;
+};
+
+// Flush batch of results to database
+static int64_t FlushBatch(Connection &conn, const std::string &target_table,
+                           std::vector<BatchCrawlEntry> &batch) {
+	if (batch.empty()) {
+		return 0;
+	}
+
+	int64_t rows_changed = 0;
+	std::vector<std::string> urls_to_remove;
+
+	for (const auto &result : batch) {
+		if (result.is_update) {
+			auto update_sql = "UPDATE " + target_table +
+			                  " SET surt_key = $2, domain = $3, http_status = $4, body = $5, content_type = $6, "
+			                  "elapsed_ms = $7, crawled_at = " + result.timestamp_expr + ", error = $8, "
+			                  "etag = $9, last_modified = $10, content_hash = $11 "
+			                  "WHERE url = $1";
+
+			auto update_result = conn.Query(update_sql, result.url, result.surt_key, result.domain, result.status_code,
+			                                 result.body.empty() ? Value() : Value(result.body),
+			                                 result.content_type.empty() ? Value() : Value(result.content_type),
+			                                 result.elapsed_ms,
+			                                 result.error.empty() ? Value() : Value(result.error),
+			                                 result.etag.empty() ? Value() : Value(result.etag),
+			                                 result.last_modified.empty() ? Value() : Value(result.last_modified),
+			                                 result.content_hash.empty() ? Value() : Value(result.content_hash));
+
+			if (!update_result->HasError()) {
+				rows_changed++;
+				urls_to_remove.push_back(result.url);
+			}
+		} else {
+			auto insert_sql = "INSERT INTO " + target_table +
+			                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash) "
+			                  "VALUES ($1, $2, $3, $4, $5, $6, $7, " + result.timestamp_expr + ", $8, $9, $10, $11)";
+
+			auto insert_result = conn.Query(insert_sql, result.url, result.surt_key, result.domain, result.status_code,
+			                                 result.body.empty() ? Value() : Value(result.body),
+			                                 result.content_type.empty() ? Value() : Value(result.content_type),
+			                                 result.elapsed_ms,
+			                                 result.error.empty() ? Value() : Value(result.error),
+			                                 result.etag.empty() ? Value() : Value(result.etag),
+			                                 result.last_modified.empty() ? Value() : Value(result.last_modified),
+			                                 result.content_hash.empty() ? Value() : Value(result.content_hash));
+
+			if (!insert_result->HasError()) {
+				rows_changed++;
+				urls_to_remove.push_back(result.url);
+			}
+		}
+	}
+
+	// Remove processed URLs from queue
+	for (const auto &url : urls_to_remove) {
+		RemoveFromQueue(conn, target_table, url);
+	}
+
+	batch.clear();
+	return rows_changed;
+}
+
 // Load pending URLs from queue (for resume after crash)
 static std::vector<UrlQueueEntry> LoadQueuedUrls(Connection &conn, const std::string &target_table) {
 	std::vector<UrlQueueEntry> entries;
@@ -1449,6 +1527,11 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 	int64_t rows_changed = 0;
 	int64_t urls_failed = 0;
+
+	// Batch insert configuration
+	const size_t BATCH_SIZE = 100;
+	std::vector<BatchCrawlEntry> result_batch;
+	result_batch.reserve(BATCH_SIZE);
 	int64_t bytes_downloaded = 0;
 	int64_t urls_total = static_cast<int64_t>(url_queue.size());
 	int64_t progress_counter = 0;
@@ -1661,52 +1744,27 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 		std::string surt_key = GenerateSurtKey(entry.url);
 		std::string content_hash = GenerateContentHash(response.body);
 
-		if (entry.is_update) {
-			// UPDATE existing row
-			auto update_sql = "UPDATE " + bind_data.target_table +
-			                  " SET surt_key = $2, domain = $3, http_status = $4, body = $5, content_type = $6, "
-			                  "elapsed_ms = $7, crawled_at = " + timestamp_expr + ", error = $8, "
-			                  "etag = $9, last_modified = $10, content_hash = $11 "
-			                  "WHERE url = $1";
+		// Add to batch
+		bytes_downloaded += static_cast<int64_t>(response.body.size());
+		result_batch.push_back(BatchCrawlEntry{
+			entry.url,
+			surt_key,
+			domain,
+			response.status_code,
+			response.body,
+			response.content_type,
+			fetch_elapsed_ms,
+			timestamp_expr,
+			response.error,
+			response.etag,
+			response.last_modified,
+			content_hash,
+			entry.is_update
+		});
 
-			auto update_result = conn.Query(update_sql, entry.url, surt_key, domain, response.status_code,
-			                                 response.body.empty() ? Value() : Value(response.body),
-			                                 response.content_type.empty() ? Value() : Value(response.content_type),
-			                                 fetch_elapsed_ms,
-			                                 response.error.empty() ? Value() : Value(response.error),
-			                                 response.etag.empty() ? Value() : Value(response.etag),
-			                                 response.last_modified.empty() ? Value() : Value(response.last_modified),
-			                                 content_hash.empty() ? Value() : Value(content_hash));
-
-			if (!update_result->HasError()) {
-				rows_changed++;
-				bytes_downloaded += static_cast<int64_t>(response.body.size());
-				RemoveFromQueue(conn, bind_data.target_table, entry.url);
-			} else {
-				urls_failed++;
-			}
-		} else {
-			// INSERT new row
-			auto insert_sql = "INSERT INTO " + bind_data.target_table +
-			                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash) "
-			                  "VALUES ($1, $2, $3, $4, $5, $6, $7, " + timestamp_expr + ", $8, $9, $10, $11)";
-
-			auto insert_result = conn.Query(insert_sql, entry.url, surt_key, domain, response.status_code,
-			                                 response.body.empty() ? Value() : Value(response.body),
-			                                 response.content_type.empty() ? Value() : Value(response.content_type),
-			                                 fetch_elapsed_ms,
-			                                 response.error.empty() ? Value() : Value(response.error),
-			                                 response.etag.empty() ? Value() : Value(response.etag),
-			                                 response.last_modified.empty() ? Value() : Value(response.last_modified),
-			                                 content_hash.empty() ? Value() : Value(content_hash));
-
-			if (!insert_result->HasError()) {
-				rows_changed++;
-				bytes_downloaded += static_cast<int64_t>(response.body.size());
-				RemoveFromQueue(conn, bind_data.target_table, entry.url);
-			} else {
-				urls_failed++;
-			}
+		// Flush batch if full
+		if (result_batch.size() >= BATCH_SIZE) {
+			rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
 		}
 
 		// Update progress every 10 URLs
@@ -1717,6 +1775,11 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			UpdateProgress(conn, bind_data.target_table, urls_total, rows_changed, urls_failed,
 			               bytes_downloaded, current_domain, elapsed);
 		}
+	}
+
+	// Flush any remaining results
+	if (!result_batch.empty()) {
+		rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
 	}
 
 	// Final progress update
