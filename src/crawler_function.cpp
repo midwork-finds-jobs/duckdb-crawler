@@ -368,6 +368,19 @@ static std::string GenerateSurtKey(const std::string &url) {
 	return surt;
 }
 
+// Generate content hash for deduplication (uses std::hash, returns hex string)
+static std::string GenerateContentHash(const std::string &content) {
+	if (content.empty()) {
+		return "";
+	}
+	std::hash<std::string> hasher;
+	size_t hash_value = hasher(content);
+	// Convert to hex string (16 chars for 64-bit hash)
+	char buf[17];
+	snprintf(buf, sizeof(buf), "%016zx", hash_value);
+	return std::string(buf);
+}
+
 // Bind data for the crawler function
 struct CrawlerBindData : public TableFunctionData {
 	std::vector<std::string> urls;
@@ -494,6 +507,9 @@ static unique_ptr<FunctionData> CrawlerBind(ClientContext &context, TableFunctio
 	names.emplace_back("last_modified");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
+	names.emplace_back("content_hash");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
 	return std::move(bind_data);
 }
 
@@ -600,6 +616,7 @@ static void CrawlerFunction(ClientContext &context, TableFunctionInput &data, Da
 			output.SetValue(8, 0, Value("robots.txt disallow"));
 			output.SetValue(9, 0, Value());   // etag
 			output.SetValue(10, 0, Value());  // last_modified
+			output.SetValue(11, 0, Value());  // content_hash
 			return;
 		} else {
 			// Skip silently, try next URL
@@ -661,6 +678,8 @@ static void CrawlerFunction(ClientContext &context, TableFunctionInput &data, Da
 	output.SetValue(8, 0, response.error.empty() ? Value() : Value(response.error));
 	output.SetValue(9, 0, response.etag.empty() ? Value() : Value(response.etag));
 	output.SetValue(10, 0, response.last_modified.empty() ? Value() : Value(response.last_modified));
+	std::string content_hash = GenerateContentHash(response.body);
+	output.SetValue(11, 0, content_hash.empty() ? Value() : Value(content_hash));
 }
 
 void RegisterCrawlerFunction(ExtensionLoader &loader) {
@@ -1254,8 +1273,8 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			if (bind_data.log_skipped) {
 				std::string surt_key = GenerateSurtKey(entry.url);
 				auto insert_sql = "INSERT INTO " + bind_data.target_table +
-				                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified) "
-				                  "VALUES ($1, $2, $3, $4, NULL, NULL, 0, NOW(), $5, NULL, NULL)";
+				                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash) "
+				                  "VALUES ($1, $2, $3, $4, NULL, NULL, 0, NOW(), $5, NULL, NULL, NULL)";
 				auto insert_result = conn.Query(insert_sql, entry.url, surt_key, domain, -1, "robots.txt disallow");
 				if (!insert_result->HasError()) {
 					rows_changed++;
@@ -1369,15 +1388,16 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 		std::string validated_date = ParseAndValidateServerDate(response.server_date);
 		std::string timestamp_expr = validated_date.empty() ? "NOW()" : ("'" + validated_date + "'::TIMESTAMP");
 
-		// Generate SURT key for sorting/deduplication
+		// Generate SURT key and content hash for deduplication
 		std::string surt_key = GenerateSurtKey(entry.url);
+		std::string content_hash = GenerateContentHash(response.body);
 
 		if (entry.is_update) {
-			// UPDATE existing row (surt_key should already exist, but update for consistency)
+			// UPDATE existing row
 			auto update_sql = "UPDATE " + bind_data.target_table +
 			                  " SET surt_key = $2, domain = $3, http_status = $4, body = $5, content_type = $6, "
 			                  "elapsed_ms = $7, crawled_at = " + timestamp_expr + ", error = $8, "
-			                  "etag = $9, last_modified = $10 "
+			                  "etag = $9, last_modified = $10, content_hash = $11 "
 			                  "WHERE url = $1";
 
 			auto update_result = conn.Query(update_sql, entry.url, surt_key, domain, response.status_code,
@@ -1386,7 +1406,8 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			                                 fetch_elapsed_ms,
 			                                 response.error.empty() ? Value() : Value(response.error),
 			                                 response.etag.empty() ? Value() : Value(response.etag),
-			                                 response.last_modified.empty() ? Value() : Value(response.last_modified));
+			                                 response.last_modified.empty() ? Value() : Value(response.last_modified),
+			                                 content_hash.empty() ? Value() : Value(content_hash));
 
 			if (!update_result->HasError()) {
 				rows_changed++;
@@ -1394,8 +1415,8 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 		} else {
 			// INSERT new row
 			auto insert_sql = "INSERT INTO " + bind_data.target_table +
-			                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified) "
-			                  "VALUES ($1, $2, $3, $4, $5, $6, $7, " + timestamp_expr + ", $8, $9, $10)";
+			                  " (url, surt_key, domain, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash) "
+			                  "VALUES ($1, $2, $3, $4, $5, $6, $7, " + timestamp_expr + ", $8, $9, $10, $11)";
 
 			auto insert_result = conn.Query(insert_sql, entry.url, surt_key, domain, response.status_code,
 			                                 response.body.empty() ? Value() : Value(response.body),
@@ -1403,7 +1424,8 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			                                 fetch_elapsed_ms,
 			                                 response.error.empty() ? Value() : Value(response.error),
 			                                 response.etag.empty() ? Value() : Value(response.etag),
-			                                 response.last_modified.empty() ? Value() : Value(response.last_modified));
+			                                 response.last_modified.empty() ? Value() : Value(response.last_modified),
+			                                 content_hash.empty() ? Value() : Value(content_hash));
 
 			if (!insert_result->HasError()) {
 				rows_changed++;
