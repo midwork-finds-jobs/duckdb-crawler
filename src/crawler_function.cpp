@@ -351,7 +351,8 @@ static std::string ExtractPath(const std::string &url) {
 }
 
 // Generate SURT key (Sort-friendly URI Reordering Transform) like Common Crawl
-// Example: https://www.example.com/path?q=1 → com,example,www)/path?q=1
+// Example: https://www.example.com/path?q=1 → com,example)/path?q=1
+// Note: 'www' prefix is stripped per SURT convention
 static std::string GenerateSurtKey(const std::string &url) {
 	// Extract domain
 	size_t proto_end = url.find("://");
@@ -374,6 +375,11 @@ static std::string GenerateSurtKey(const std::string &url) {
 
 	// Convert domain to lowercase
 	std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+
+	// Strip 'www.' prefix per SURT convention
+	if (domain.substr(0, 4) == "www.") {
+		domain = domain.substr(4);
+	}
 
 	// Split domain by '.' and reverse
 	std::vector<std::string> parts;
@@ -401,6 +407,52 @@ static std::string GenerateSurtKey(const std::string &url) {
 	} else {
 		surt += "/";
 	}
+
+	return surt;
+}
+
+// Generate domain SURT prefix for fast lookups (without trailing path)
+// Example: "www.example.com" → "com,example)"
+// Example: "example.com" → "com,example)"
+static std::string GenerateDomainSurt(const std::string &hostname) {
+	if (hostname.empty()) {
+		return "";
+	}
+
+	// Convert to lowercase
+	std::string domain = hostname;
+	std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
+
+	// Remove port if present
+	size_t port_pos = domain.find(':');
+	if (port_pos != std::string::npos) {
+		domain = domain.substr(0, port_pos);
+	}
+
+	// Strip 'www.' prefix per SURT convention
+	if (domain.substr(0, 4) == "www.") {
+		domain = domain.substr(4);
+	}
+
+	// Split domain by '.' and reverse
+	std::vector<std::string> parts;
+	size_t pos = 0;
+	size_t prev = 0;
+	while ((pos = domain.find('.', prev)) != std::string::npos) {
+		parts.push_back(domain.substr(prev, pos - prev));
+		prev = pos + 1;
+	}
+	parts.push_back(domain.substr(prev));
+
+	// Build reversed domain with commas
+	std::string surt;
+	for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+		if (!surt.empty()) {
+			surt += ",";
+		}
+		surt += *it;
+	}
+	surt += ")";
 
 	return surt;
 }
@@ -847,6 +899,7 @@ struct CrawlIntoGlobalState : public GlobalTableFunctionState {
 	int64_t rows_inserted = 0;
 
 	// Progress tracking
+	std::atomic<bool> discovery_started{false};
 	std::atomic<int64_t> total_urls{0};
 	std::atomic<int64_t> processed_urls{0};
 
@@ -957,22 +1010,28 @@ static bool MatchesLikePattern(const std::string &url, const std::string &patter
 	return pat_pos == pat_len;
 }
 
-// Helper: Ensure sitemap cache table exists
+// Helper: Ensure sitemap cache table exists with SURT-based indexing
 static void EnsureSitemapCacheTable(Connection &conn) {
-	// Create table with all columns including metadata
+	// Check if table exists and has old schema (hostname or domain_surt column)
+	auto check_result = conn.Query("SELECT 1 FROM _crawl_sitemap_cache LIMIT 0");
+	if (!check_result->HasError()) {
+		// Table exists - check if it has the old schema
+		auto col_check = conn.Query("SELECT hostname FROM _crawl_sitemap_cache LIMIT 0");
+		auto col_check2 = conn.Query("SELECT domain_surt FROM _crawl_sitemap_cache LIMIT 0");
+		if (!col_check->HasError() || !col_check2->HasError()) {
+			// Old schema - drop and recreate
+			conn.Query("DROP TABLE _crawl_sitemap_cache");
+		}
+	}
+
+	// Create table with SURT-based schema (query by surt_key LIKE 'fi,normal)%')
 	conn.Query("CREATE TABLE IF NOT EXISTS _crawl_sitemap_cache ("
-	           "hostname VARCHAR, "
-	           "url VARCHAR, "
+	           "surt_key VARCHAR PRIMARY KEY, "  // SURT of URL, e.g. "fi,normal)/path"
+	           "url VARCHAR NOT NULL, "
 	           "lastmod TIMESTAMP, "
 	           "changefreq VARCHAR, "
 	           "priority DOUBLE, "
-	           "discovered_at TIMESTAMP DEFAULT NOW(), "
-	           "PRIMARY KEY (hostname, url))");
-
-	// Migration: add columns if they don't exist (for existing tables)
-	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS lastmod TIMESTAMP");
-	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS changefreq VARCHAR");
-	conn.Query("ALTER TABLE _crawl_sitemap_cache ADD COLUMN IF NOT EXISTS priority DOUBLE");
+	           "discovered_at TIMESTAMP DEFAULT NOW())");
 }
 
 // Helper: Convert changefreq to hours threshold
@@ -1012,9 +1071,10 @@ static bool IsUrlStale(Connection &conn, const std::string &url, const std::stri
 		return true;  // No crawled_at, consider stale
 	}
 
-	// Get sitemap metadata for this URL
+	// Get sitemap metadata for this URL using SURT key
+	std::string surt_key = GenerateSurtKey(url);
 	auto cache_result = conn.Query(
-	    "SELECT lastmod, changefreq FROM _crawl_sitemap_cache WHERE url = $1", url);
+	    "SELECT lastmod, changefreq FROM _crawl_sitemap_cache WHERE surt_key = $1", surt_key);
 
 	if (cache_result->HasError()) {
 		return false;
@@ -1067,15 +1127,19 @@ static bool IsUrlStale(Connection &conn, const std::string &url, const std::stri
 	return false;
 }
 
-// Helper: Get cached sitemap URLs if still valid
+// Helper: Get cached sitemap URLs if still valid (using SURT prefix matching)
 static std::vector<std::string> GetCachedSitemapUrls(Connection &conn, const std::string &hostname,
                                                       double cache_hours) {
 	std::vector<std::string> urls;
 
+	// Generate domain SURT prefix for matching (e.g., "fi,normal)" for normal.fi)
+	std::string surt_prefix = GenerateDomainSurt(hostname);
+
+	// Query using LIKE prefix match on surt_key
 	auto result = conn.Query(
 	    "SELECT url FROM _crawl_sitemap_cache "
-	    "WHERE hostname = $1 AND discovered_at > NOW() - INTERVAL '" + std::to_string(cache_hours) + " hours'",
-	    hostname);
+	    "WHERE surt_key LIKE $1 AND discovered_at > NOW() - INTERVAL '" + std::to_string(cache_hours) + " hours'",
+	    surt_prefix + "%");
 
 	if (!result->HasError()) {
 		while (auto chunk = result->Fetch()) {
@@ -1091,22 +1155,27 @@ static std::vector<std::string> GetCachedSitemapUrls(Connection &conn, const std
 	return urls;
 }
 
-// Helper: Cache discovered sitemap URLs with metadata
+// Helper: Cache discovered sitemap URLs with SURT keys for fast lookups
 static void CacheSitemapUrls(Connection &conn, const std::string &hostname,
                               const std::vector<SitemapEntry> &entries) {
-	// Clear old cache for this hostname
-	conn.Query("DELETE FROM _crawl_sitemap_cache WHERE hostname = $1", hostname);
+	// Generate domain SURT prefix for this hostname
+	std::string surt_prefix = GenerateDomainSurt(hostname);
 
-	// Insert entries with metadata
+	// Clear old cache for this domain using LIKE prefix
+	conn.Query("DELETE FROM _crawl_sitemap_cache WHERE surt_key LIKE $1", surt_prefix + "%");
+
+	// Insert entries with SURT keys
 	for (const auto &entry : entries) {
+		std::string surt_key = GenerateSurtKey(entry.loc);
+
 		// Parse lastmod - DuckDB handles ISO8601 and date-only formats
 		Value lastmod_val = entry.lastmod.empty() ? Value() : Value(entry.lastmod);
 		Value changefreq_val = entry.changefreq.empty() ? Value() : Value(entry.changefreq);
 		Value priority_val = entry.priority.empty() ? Value() : Value(std::stod(entry.priority));
 
-		conn.Query("INSERT INTO _crawl_sitemap_cache (hostname, url, lastmod, changefreq, priority) "
+		conn.Query("INSERT OR REPLACE INTO _crawl_sitemap_cache (surt_key, url, lastmod, changefreq, priority) "
 		           "VALUES ($1, $2, $3, $4, $5)",
-		           hostname, entry.loc, lastmod_val, changefreq_val, priority_val);
+		           surt_key, entry.loc, lastmod_val, changefreq_val, priority_val);
 	}
 }
 
@@ -1121,8 +1190,18 @@ struct DiscoveryStatus {
 };
 
 static void EnsureDiscoveryStatusTable(Connection &conn) {
+	// Check if table exists and has old schema (hostname column)
+	auto check_result = conn.Query("SELECT 1 FROM _crawl_sitemap_discovery_status LIMIT 0");
+	if (!check_result->HasError()) {
+		auto col_check = conn.Query("SELECT hostname FROM _crawl_sitemap_discovery_status LIMIT 0");
+		if (!col_check->HasError()) {
+			// Old schema - drop and recreate
+			conn.Query("DROP TABLE _crawl_sitemap_discovery_status");
+		}
+	}
+
 	conn.Query("CREATE TABLE IF NOT EXISTS _crawl_sitemap_discovery_status ("
-	           "hostname VARCHAR PRIMARY KEY, "
+	           "domain_surt VARCHAR PRIMARY KEY, "  // SURT key for fast lookups
 	           "discovery_method VARCHAR, "
 	           "discovered_at TIMESTAMP DEFAULT NOW(), "
 	           "urls_found INTEGER DEFAULT 0)");
@@ -1130,11 +1209,12 @@ static void EnsureDiscoveryStatusTable(Connection &conn) {
 
 static DiscoveryStatus GetDiscoveryStatus(Connection &conn, const std::string &hostname, double cache_hours) {
 	DiscoveryStatus status;
+	std::string domain_surt = GenerateDomainSurt(hostname);
 
 	auto result = conn.Query(
 	    "SELECT discovery_method, urls_found FROM _crawl_sitemap_discovery_status "
-	    "WHERE hostname = $1 AND discovered_at > NOW() - INTERVAL '" + std::to_string(cache_hours) + " hours'",
-	    hostname);
+	    "WHERE domain_surt = $1 AND discovered_at > NOW() - INTERVAL '" + std::to_string(cache_hours) + " hours'",
+	    domain_surt);
 
 	if (!result->HasError()) {
 		auto chunk = result->Fetch();
@@ -1151,41 +1231,11 @@ static DiscoveryStatus GetDiscoveryStatus(Connection &conn, const std::string &h
 
 static void UpdateDiscoveryStatus(Connection &conn, const std::string &hostname,
                                    const std::string &method, int urls_found) {
+	std::string domain_surt = GenerateDomainSurt(hostname);
 	conn.Query("INSERT OR REPLACE INTO _crawl_sitemap_discovery_status "
-	           "(hostname, discovery_method, discovered_at, urls_found) "
+	           "(domain_surt, discovery_method, discovered_at, urls_found) "
 	           "VALUES ($1, $2, NOW(), $3)",
-	           hostname, method, urls_found);
-}
-
-//===--------------------------------------------------------------------===//
-// Persistent Queue for Crash Recovery
-//===--------------------------------------------------------------------===//
-
-// Ensure crawl queue table exists
-static void EnsureCrawlQueueTable(Connection &conn, const std::string &target_table) {
-	std::string queue_table = "_crawl_queue_" + target_table;
-	conn.Query("CREATE TABLE IF NOT EXISTS \"" + queue_table + "\" ("
-	           "url VARCHAR PRIMARY KEY, "
-	           "retry_count INTEGER DEFAULT 0, "
-	           "is_update BOOLEAN DEFAULT FALSE, "
-	           "domain VARCHAR, "
-	           "added_at TIMESTAMP DEFAULT NOW())");
-}
-
-// Add URLs to persistent queue
-static void AddToQueue(Connection &conn, const std::string &target_table,
-                       const std::vector<std::string> &urls, const std::string &domain, bool is_update) {
-	std::string queue_table = "_crawl_queue_" + target_table;
-	for (const auto &url : urls) {
-		conn.Query("INSERT OR IGNORE INTO \"" + queue_table + "\" (url, domain, is_update) VALUES ($1, $2, $3)",
-		           url, domain, is_update);
-	}
-}
-
-// Remove URL from queue after successful processing
-static void RemoveFromQueue(Connection &conn, const std::string &target_table, const std::string &url) {
-	std::string queue_table = "_crawl_queue_" + target_table;
-	conn.Query("DELETE FROM \"" + queue_table + "\" WHERE url = $1", url);
+	           domain_surt, method, urls_found);
 }
 
 // Result struct for batch inserts (different from CrawlResult used by crawl() function)
@@ -1212,7 +1262,6 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 	}
 
 	int64_t rows_changed = 0;
-	std::vector<std::string> urls_to_remove;
 
 	for (const auto &result : batch) {
 		if (result.is_update) {
@@ -1233,7 +1282,6 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 
 			if (!update_result->HasError()) {
 				rows_changed++;
-				urls_to_remove.push_back(result.url);
 			}
 		} else {
 			auto insert_sql = "INSERT INTO " + target_table +
@@ -1251,56 +1299,12 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 
 			if (!insert_result->HasError()) {
 				rows_changed++;
-				urls_to_remove.push_back(result.url);
 			}
 		}
-	}
-
-	// Remove processed URLs from queue
-	for (const auto &url : urls_to_remove) {
-		RemoveFromQueue(conn, target_table, url);
 	}
 
 	batch.clear();
 	return rows_changed;
-}
-
-// Load pending URLs from queue (for resume after crash)
-static std::vector<UrlQueueEntry> LoadQueuedUrls(Connection &conn, const std::string &target_table) {
-	std::vector<UrlQueueEntry> entries;
-	std::string queue_table = "_crawl_queue_" + target_table;
-
-	auto result = conn.Query("SELECT url, retry_count, is_update FROM \"" + queue_table + "\" ORDER BY added_at");
-	if (!result->HasError()) {
-		auto now = std::chrono::steady_clock::now();
-		while (auto chunk = result->Fetch()) {
-			for (idx_t i = 0; i < chunk->size(); i++) {
-				auto url_val = chunk->GetValue(0, i);
-				auto retry_val = chunk->GetValue(1, i);
-				auto update_val = chunk->GetValue(2, i);
-				if (!url_val.IsNull()) {
-					std::string url = StringValue::Get(url_val);
-					int retry = retry_val.IsNull() ? 0 : retry_val.GetValue<int>();
-					bool is_update = !update_val.IsNull() && update_val.GetValue<bool>();
-					entries.push_back(UrlQueueEntry(url, retry, is_update, now));
-				}
-			}
-		}
-	}
-	return entries;
-}
-
-// Get queue size
-static int64_t GetQueueSize(Connection &conn, const std::string &target_table) {
-	std::string queue_table = "_crawl_queue_" + target_table;
-	auto result = conn.Query("SELECT COUNT(*) FROM \"" + queue_table + "\"");
-	if (!result->HasError()) {
-		auto chunk = result->Fetch();
-		if (chunk && chunk->size() > 0) {
-			return chunk->GetValue(0, 0).GetValue<int64_t>();
-		}
-	}
-	return 0;
 }
 
 //===--------------------------------------------------------------------===//
@@ -1319,62 +1323,6 @@ static void EnsureTargetTable(Connection &conn, const std::string &target_table)
 	           "last_modified VARCHAR, "
 	           "content_hash VARCHAR, "
 	           "error_type VARCHAR)");
-}
-
-//===--------------------------------------------------------------------===//
-// Progress Reporting
-//===--------------------------------------------------------------------===//
-
-// Ensure progress table exists
-static void EnsureProgressTable(Connection &conn, const std::string &target_table) {
-	std::string progress_table = "_crawl_progress_" + target_table;
-	conn.Query("CREATE TABLE IF NOT EXISTS \"" + progress_table + "\" ("
-	           "updated_at TIMESTAMP PRIMARY KEY DEFAULT NOW(), "
-	           "urls_total BIGINT, "
-	           "urls_completed BIGINT, "
-	           "urls_failed BIGINT, "
-	           "urls_remaining BIGINT, "
-	           "bytes_downloaded BIGINT, "
-	           "current_domain VARCHAR, "
-	           "elapsed_seconds DOUBLE)");
-}
-
-// Update progress
-static void UpdateProgress(Connection &conn, const std::string &target_table,
-                           int64_t urls_total, int64_t urls_completed, int64_t urls_failed,
-                           int64_t bytes_downloaded, const std::string &current_domain,
-                           double elapsed_seconds) {
-	std::string progress_table = "_crawl_progress_" + target_table;
-	int64_t urls_remaining = urls_total - urls_completed - urls_failed;
-
-	conn.Query("INSERT INTO \"" + progress_table + "\" "
-	           "(urls_total, urls_completed, urls_failed, urls_remaining, bytes_downloaded, current_domain, elapsed_seconds) "
-	           "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-	           urls_total, urls_completed, urls_failed, urls_remaining, bytes_downloaded,
-	           current_domain.empty() ? Value() : Value(current_domain), elapsed_seconds);
-}
-
-// Get latest progress
-static void GetLatestProgress(Connection &conn, const std::string &target_table,
-                               int64_t &urls_completed, int64_t &urls_failed, int64_t &bytes_downloaded) {
-	std::string progress_table = "_crawl_progress_" + target_table;
-	auto result = conn.Query("SELECT urls_completed, urls_failed, bytes_downloaded FROM \"" + progress_table + "\" "
-	                          "ORDER BY updated_at DESC LIMIT 1");
-	if (!result->HasError()) {
-		auto chunk = result->Fetch();
-		if (chunk && chunk->size() > 0) {
-			auto comp_val = chunk->GetValue(0, 0);
-			auto fail_val = chunk->GetValue(1, 0);
-			auto bytes_val = chunk->GetValue(2, 0);
-			urls_completed = comp_val.IsNull() ? 0 : comp_val.GetValue<int64_t>();
-			urls_failed = fail_val.IsNull() ? 0 : fail_val.GetValue<int64_t>();
-			bytes_downloaded = bytes_val.IsNull() ? 0 : bytes_val.GetValue<int64_t>();
-			return;
-		}
-	}
-	urls_completed = 0;
-	urls_failed = 0;
-	bytes_downloaded = 0;
 }
 
 // Input type for CRAWL SITES
@@ -1974,20 +1922,13 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	// Prepare domain states for rate limiting
 	std::unordered_map<std::string, DomainState> domain_states;
 
-	// Initialize persistent queue for crash recovery
-	EnsureCrawlQueueTable(conn, bind_data.target_table);
-
-	// Initialize progress tracking
-	EnsureProgressTable(conn, bind_data.target_table);
-
 	// Ensure target table exists for results
 	EnsureTargetTable(conn, bind_data.target_table);
 
 	auto crawl_start_time = std::chrono::steady_clock::now();
 
-	// Check for existing queued URLs (resume from previous run)
-	auto queued_entries = LoadQueuedUrls(conn, bind_data.target_table);
-	bool is_resume = !queued_entries.empty();
+	// Mark discovery as started for progress bar
+	global_state.discovery_started.store(true);
 
 	// Discover URLs from hostnames/sites - always use discovery mode
 	std::vector<std::string> urls;
@@ -2062,56 +2003,26 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 	auto now = std::chrono::steady_clock::now();
 
-	if (is_resume) {
-		// Resume mode: load queued entries directly
-		for (auto &entry : queued_entries) {
-			url_queue.push(std::move(entry));
+	// Build queue from discovered URLs
+	for (const auto &url : urls) {
+		if (existing_urls.find(url) == existing_urls.end()) {
+			// New URL - can be fetched immediately
+			url_queue.push(UrlQueueEntry(url, 0, false, now));
 		}
-	} else {
-		// Fresh start: build queue from discovered URLs
-		std::vector<std::string> new_urls_to_queue;
-		std::vector<std::string> update_urls_to_queue;
+	}
+
+	// If update_stale enabled, check existing URLs for staleness and add them
+	if (bind_data.update_stale && !existing_urls.empty()) {
+		// Ensure sitemap cache exists for staleness checks
+		EnsureSitemapCacheTable(conn);
 
 		for (const auto &url : urls) {
-			if (existing_urls.find(url) == existing_urls.end()) {
-				// New URL - can be fetched immediately
-				url_queue.push(UrlQueueEntry(url, 0, false, now));
-				new_urls_to_queue.push_back(url);
-			}
-		}
-
-		// If update_stale enabled, check existing URLs for staleness and add them
-		if (bind_data.update_stale && !existing_urls.empty()) {
-			// Ensure sitemap cache exists for staleness checks
-			EnsureSitemapCacheTable(conn);
-
-			for (const auto &url : urls) {
-				if (existing_urls.find(url) != existing_urls.end()) {
-					// Existing URL - check if stale
-					if (IsUrlStale(conn, url, bind_data.target_table)) {
-						url_queue.push(UrlQueueEntry(url, 0, true, now));  // is_update = true
-						update_urls_to_queue.push_back(url);
-					}
+			if (existing_urls.find(url) != existing_urls.end()) {
+				// Existing URL - check if stale
+				if (IsUrlStale(conn, url, bind_data.target_table)) {
+					url_queue.push(UrlQueueEntry(url, 0, true, now));  // is_update = true
 				}
 			}
-		}
-
-		// Persist queue to database for crash recovery (grouped by domain)
-		std::unordered_map<std::string, std::vector<std::string>> new_by_domain;
-		std::unordered_map<std::string, std::vector<std::string>> update_by_domain;
-
-		for (const auto &url : new_urls_to_queue) {
-			new_by_domain[ExtractDomain(url)].push_back(url);
-		}
-		for (const auto &url : update_urls_to_queue) {
-			update_by_domain[ExtractDomain(url)].push_back(url);
-		}
-
-		for (const auto &pair : new_by_domain) {
-			AddToQueue(conn, bind_data.target_table, pair.second, pair.first, false);
-		}
-		for (const auto &pair : update_by_domain) {
-			AddToQueue(conn, bind_data.target_table, pair.second, pair.first, true);
 		}
 	}
 
@@ -2122,16 +2033,12 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	}
 
 	int64_t rows_changed = 0;
-	int64_t urls_failed = 0;
 
 	// Batch insert configuration
 	const size_t BATCH_SIZE = 100;
 	std::vector<BatchCrawlEntry> result_batch;
 	result_batch.reserve(BATCH_SIZE);
-	int64_t bytes_downloaded = 0;
 	int64_t urls_total = static_cast<int64_t>(url_queue.size());
-	int64_t progress_counter = 0;
-	std::string current_domain;
 
 	// Set total for progress bar
 	global_state.total_urls.store(urls_total);
@@ -2164,7 +2071,6 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 		std::string domain = ExtractDomain(entry.url);
 		std::string path = ExtractPath(entry.url);
-		current_domain = domain;
 
 		auto &domain_state = domain_states[domain];
 
@@ -2222,11 +2128,7 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 				auto insert_result = conn.Query(insert_sql, entry.url, surt_key, -1, "robots.txt disallow");
 				if (!insert_result->HasError()) {
 					rows_changed++;
-					RemoveFromQueue(conn, bind_data.target_table, entry.url);
 				}
-			} else {
-				// Not logging, still remove from queue
-				RemoveFromQueue(conn, bind_data.target_table, entry.url);
 			}
 			continue;
 		}
@@ -2350,7 +2252,6 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 		std::string content_hash = GenerateContentHash(response.body);
 
 		// Add to batch
-		bytes_downloaded += static_cast<int64_t>(response.body.size());
 		result_batch.push_back(BatchCrawlEntry{
 			entry.url,
 			surt_key,
@@ -2371,27 +2272,14 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
 		}
 
-		// Update progress every 10 URLs
-		progress_counter++;
+		// Update progress for progress bar
 		global_state.processed_urls.fetch_add(1);
-		if (progress_counter % 10 == 0) {
-			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-			    std::chrono::steady_clock::now() - crawl_start_time).count() / 1000.0;
-			UpdateProgress(conn, bind_data.target_table, urls_total, rows_changed, urls_failed,
-			               bytes_downloaded, current_domain, elapsed);
-		}
 	}
 
 	// Flush any remaining results
 	if (!result_batch.empty()) {
 		rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
 	}
-
-	// Final progress update
-	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-	    std::chrono::steady_clock::now() - crawl_start_time).count() / 1000.0;
-	UpdateProgress(conn, bind_data.target_table, urls_total, rows_changed, urls_failed,
-	               bytes_downloaded, "", elapsed);
 
 	global_state.rows_inserted = rows_changed;
 
@@ -2469,7 +2357,7 @@ static void StopCrawlFunction(ClientContext &context, TableFunctionInput &data, 
 	output.SetValue(0, 0, Value(status));
 }
 
-// Progress callback for CRAWL function - returns percentage (0-100)
+// Progress callback for CRAWL function - returns fraction 0.0 to 1.0
 static double CrawlIntoProgress(ClientContext &context, const FunctionData *bind_data_p,
                                  const GlobalTableFunctionState *gstate_p) {
 	if (!gstate_p) {
@@ -2482,10 +2370,14 @@ static double CrawlIntoProgress(ClientContext &context, const FunctionData *bind
 	int64_t processed = gstate.processed_urls.load();
 
 	if (total <= 0) {
-		return -1.0;  // Still discovering URLs
+		// During discovery phase, show small progress to indicate activity
+		if (gstate.discovery_started.load()) {
+			return 0.005;  // 0.5% - show "discovering..." progress
+		}
+		return -1.0;  // Not started yet
 	}
 
-	return (static_cast<double>(processed) / static_cast<double>(total)) * 100.0;
+	return static_cast<double>(processed) / static_cast<double>(total);
 }
 
 void RegisterCrawlIntoFunction(ExtensionLoader &loader) {

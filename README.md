@@ -12,8 +12,8 @@ A DuckDB extension for web crawling with automatic rate limiting, robots.txt com
 - **Conditional requests** - ETag/Last-Modified support for efficient re-crawling
 - **Content deduplication** - SHA-256 content hash
 - **SURT key normalization** - Common Crawl compatible URL keys
-- **Crash recovery** - Persistent queue survives interruptions
-- **Progress tracking** - Monitor crawl status via `_crawl_progress_{table}`
+- **Sitemap caching** - SURT-indexed cache for fast domain lookups
+- **Progress bar** - Built-in DuckDB progress tracking
 - **Graceful shutdown** - Ctrl+C or `STOP CRAWL` stops cleanly
 
 ## Installation
@@ -166,15 +166,16 @@ The target table is created automatically with this schema:
 
 The extension creates helper tables automatically:
 
-- `_crawl_queue_{table}` - Persistent queue for crash recovery
-- `_crawl_progress_{table}` - Crawl progress and statistics
-- `_crawl_sitemap_cache` - Cached sitemap URLs with lastmod/changefreq
-- `_crawl_sitemap_discovery_status` - Discovery method per hostname (sitemap/link_crawl/not_found)
+- `_crawl_sitemap_cache` - Cached sitemap URLs indexed by SURT key for fast domain lookups
+- `_crawl_sitemap_discovery_status` - Discovery method per domain (sitemap/link_crawl/not_found)
 
-### Monitor Progress
+### Query Sitemap Cache
 
 ```sql
-SELECT * FROM _crawl_progress_crawl_results ORDER BY updated_at DESC LIMIT 1;
+-- View cached URLs for a domain using SURT prefix
+SELECT url, lastmod FROM _crawl_sitemap_cache
+WHERE surt_key LIKE 'com,example)%'
+ORDER BY lastmod DESC;
 ```
 
 ## robots.txt Compliance
