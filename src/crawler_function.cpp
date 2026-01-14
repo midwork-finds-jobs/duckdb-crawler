@@ -846,6 +846,10 @@ struct CrawlIntoGlobalState : public GlobalTableFunctionState {
 	bool executed = false;
 	int64_t rows_inserted = 0;
 
+	// Progress tracking
+	std::atomic<int64_t> total_urls{0};
+	std::atomic<int64_t> processed_urls{0};
+
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -2129,6 +2133,10 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	int64_t progress_counter = 0;
 	std::string current_domain;
 
+	// Set total for progress bar
+	global_state.total_urls.store(urls_total);
+	global_state.processed_urls.store(0);
+
 	// Process URL priority queue with retry logic
 	// Check both global shutdown and specific crawl stop signal
 	auto should_stop = [&]() {
@@ -2365,6 +2373,7 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 		// Update progress every 10 URLs
 		progress_counter++;
+		global_state.processed_urls.fetch_add(1);
 		if (progress_counter % 10 == 0) {
 			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 			    std::chrono::steady_clock::now() - crawl_start_time).count() / 1000.0;
@@ -2460,6 +2469,25 @@ static void StopCrawlFunction(ClientContext &context, TableFunctionInput &data, 
 	output.SetValue(0, 0, Value(status));
 }
 
+// Progress callback for CRAWL function - returns percentage (0-100)
+static double CrawlIntoProgress(ClientContext &context, const FunctionData *bind_data_p,
+                                 const GlobalTableFunctionState *gstate_p) {
+	if (!gstate_p) {
+		return -1.0;  // Unknown progress
+	}
+
+	auto &gstate = gstate_p->Cast<CrawlIntoGlobalState>();
+
+	int64_t total = gstate.total_urls.load();
+	int64_t processed = gstate.processed_urls.load();
+
+	if (total <= 0) {
+		return -1.0;  // Still discovering URLs
+	}
+
+	return (static_cast<double>(processed) / static_cast<double>(total)) * 100.0;
+}
+
 void RegisterCrawlIntoFunction(ExtensionLoader &loader) {
 	TableFunction crawl_into_func("crawl_into_internal",
 	                               {LogicalType::INTEGER,  // statement_type (0=CRAWL)
@@ -2489,6 +2517,9 @@ void RegisterCrawlIntoFunction(ExtensionLoader &loader) {
 	                                LogicalType::BOOLEAN,  // respect_nofollow
 	                                LogicalType::BOOLEAN}, // follow_canonical
 	                               CrawlIntoFunction, CrawlIntoBind, CrawlIntoInitGlobal);
+
+	// Set progress callback for progress bar integration
+	crawl_into_func.table_scan_progress = CrawlIntoProgress;
 
 	loader.RegisterFunction(crawl_into_func);
 
