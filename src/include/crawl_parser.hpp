@@ -40,6 +40,10 @@ struct CrawlParseData : public ParserExtensionParseData {
 	int64_t max_response_bytes = 10 * 1024 * 1024;  // Max response size (10MB default)
 	bool compress = true;                  // Request gzip/deflate compression
 
+	// Content-Type filtering (comma-separated, supports wildcards like "text/*")
+	string accept_content_types;  // Only accept these types (empty = accept all)
+	string reject_content_types;  // Reject these types (checked after accept)
+
 	unique_ptr<ParserExtensionParseData> Copy() const override;
 	string ToString() const override;
 };

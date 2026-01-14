@@ -16,6 +16,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <sstream>
 #include <unordered_map>
 #include <queue>
 #include <deque>
@@ -381,6 +382,82 @@ static std::string GenerateContentHash(const std::string &content) {
 	return std::string(buf);
 }
 
+// Check if content-type matches a pattern (supports wildcards like "text/*")
+static bool ContentTypeMatches(const std::string &content_type, const std::string &pattern) {
+	if (pattern.empty()) {
+		return false;
+	}
+	// Extract main type from content_type (e.g., "text/html; charset=utf-8" -> "text/html")
+	std::string ct = content_type;
+	size_t semicolon = ct.find(';');
+	if (semicolon != std::string::npos) {
+		ct = ct.substr(0, semicolon);
+	}
+	// Trim whitespace
+	while (!ct.empty() && std::isspace(ct.back())) ct.pop_back();
+	while (!ct.empty() && std::isspace(ct.front())) ct.erase(ct.begin());
+
+	// Convert both to lowercase for comparison
+	std::string ct_lower = ct;
+	std::string pat_lower = pattern;
+	std::transform(ct_lower.begin(), ct_lower.end(), ct_lower.begin(), ::tolower);
+	std::transform(pat_lower.begin(), pat_lower.end(), pat_lower.begin(), ::tolower);
+
+	// Check for wildcard (e.g., "text/*")
+	if (pat_lower.length() >= 2 && pat_lower.substr(pat_lower.length() - 2) == "/*") {
+		std::string prefix = pat_lower.substr(0, pat_lower.length() - 1);  // "text/"
+		return ct_lower.find(prefix) == 0;
+	}
+
+	// Exact match
+	return ct_lower == pat_lower;
+}
+
+// Check if content-type is acceptable (matches accept list, doesn't match reject list)
+static bool IsContentTypeAcceptable(const std::string &content_type,
+                                     const std::string &accept_types,
+                                     const std::string &reject_types) {
+	// If no filters, accept all
+	if (accept_types.empty() && reject_types.empty()) {
+		return true;
+	}
+
+	// Check accept list first (if specified)
+	if (!accept_types.empty()) {
+		bool accepted = false;
+		std::istringstream accept_stream(accept_types);
+		std::string pattern;
+		while (std::getline(accept_stream, pattern, ',')) {
+			// Trim whitespace
+			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
+			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
+			if (ContentTypeMatches(content_type, pattern)) {
+				accepted = true;
+				break;
+			}
+		}
+		if (!accepted) {
+			return false;
+		}
+	}
+
+	// Check reject list (if specified)
+	if (!reject_types.empty()) {
+		std::istringstream reject_stream(reject_types);
+		std::string pattern;
+		while (std::getline(reject_stream, pattern, ',')) {
+			// Trim whitespace
+			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
+			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
+			if (ContentTypeMatches(content_type, pattern)) {
+				return false;  // Rejected
+			}
+		}
+	}
+
+	return true;
+}
+
 // Bind data for the crawler function
 struct CrawlerBindData : public TableFunctionData {
 	std::vector<std::string> urls;
@@ -722,6 +799,8 @@ struct CrawlIntoBindData : public TableFunctionData {
 	int max_total_connections = 32;        // Global max concurrent connections
 	int64_t max_response_bytes = 10 * 1024 * 1024;  // Max response size (10MB)
 	bool compress = true;                  // Request gzip compression
+	std::string accept_content_types;      // Only accept these content types
+	std::string reject_content_types;      // Reject these content types
 };
 
 struct CrawlIntoGlobalState : public GlobalTableFunctionState {
@@ -740,8 +819,9 @@ static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunct
 
 	// Get parameters from positional arguments (set by PlanCrawl)
 	// Order: mode, source_query, target_table, user_agent, delays..., url_filter, sitemap_cache_hours, update_stale,
-	//        max_retry_backoff_seconds, max_parallel_per_domain, max_total_connections, max_response_bytes, compress
-	if (input.inputs.size() >= 18) {
+	//        max_retry_backoff_seconds, max_parallel_per_domain, max_total_connections, max_response_bytes, compress,
+	//        accept_content_types, reject_content_types
+	if (input.inputs.size() >= 20) {
 		bind_data->crawl_mode = input.inputs[0].GetValue<int32_t>();
 		bind_data->source_query = StringValue::Get(input.inputs[1]);
 		bind_data->target_table = StringValue::Get(input.inputs[2]);
@@ -760,8 +840,10 @@ static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunct
 		bind_data->max_total_connections = input.inputs[15].GetValue<int>();
 		bind_data->max_response_bytes = input.inputs[16].GetValue<int64_t>();
 		bind_data->compress = input.inputs[17].GetValue<bool>();
+		bind_data->accept_content_types = StringValue::Get(input.inputs[18]);
+		bind_data->reject_content_types = StringValue::Get(input.inputs[19]);
 	} else {
-		throw BinderException("crawl_into_internal: insufficient parameters (expected 18, got " +
+		throw BinderException("crawl_into_internal: insufficient parameters (expected 20, got " +
 		                      std::to_string(input.inputs.size()) + ")");
 	}
 
@@ -1523,6 +1605,15 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 			response.body.clear();  // Don't store oversized content
 		}
 
+		// Check content-type filter
+		if (response.success && !IsContentTypeAcceptable(response.content_type,
+		                                                   bind_data.accept_content_types,
+		                                                   bind_data.reject_content_types)) {
+			response.success = false;
+			response.error = "Content-Type rejected: " + response.content_type;
+			response.body.clear();  // Don't store rejected content
+		}
+
 		// Check for retryable errors (429, 5XX, network errors)
 		bool is_retryable = (response.status_code == 429 ||
 		                     (response.status_code >= 500 && response.status_code <= 504) ||
@@ -1659,7 +1750,9 @@ void RegisterCrawlIntoFunction(ExtensionLoader &loader) {
 	                                LogicalType::INTEGER,  // max_parallel_per_domain
 	                                LogicalType::INTEGER,  // max_total_connections
 	                                LogicalType::BIGINT,   // max_response_bytes
-	                                LogicalType::BOOLEAN}, // compress
+	                                LogicalType::BOOLEAN,  // compress
+	                                LogicalType::VARCHAR,  // accept_content_types
+	                                LogicalType::VARCHAR}, // reject_content_types
 	                               CrawlIntoFunction, CrawlIntoBind, CrawlIntoInitGlobal);
 
 	loader.RegisterFunction(crawl_into_func);

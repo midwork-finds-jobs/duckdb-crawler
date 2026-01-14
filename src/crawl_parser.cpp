@@ -31,6 +31,8 @@ unique_ptr<ParserExtensionParseData> CrawlParseData::Copy() const {
 	copy->max_total_connections = max_total_connections;
 	copy->max_response_bytes = max_response_bytes;
 	copy->compress = compress;
+	copy->accept_content_types = accept_content_types;
+	copy->reject_content_types = reject_content_types;
 	return copy;
 }
 
@@ -175,6 +177,10 @@ static bool ParseWithOptions(const string &options_str, CrawlParseData &data) {
 			data.max_response_bytes = std::stoll(value);
 		} else if (key == "compress") {
 			data.compress = (StringUtil::Lower(value) == "true" || value == "1");
+		} else if (key == "accept_content_types") {
+			data.accept_content_types = value;
+		} else if (key == "reject_content_types") {
+			data.reject_content_types = value;
 		}
 	}
 
@@ -360,6 +366,8 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 	result.parameters.push_back(Value(data.max_total_connections));
 	result.parameters.push_back(Value(data.max_response_bytes));
 	result.parameters.push_back(Value(data.compress));
+	result.parameters.push_back(Value(data.accept_content_types));
+	result.parameters.push_back(Value(data.reject_content_types));
 
 	result.requires_valid_transaction = true;
 	result.return_type = StatementReturnType::CHANGED_ROWS;
