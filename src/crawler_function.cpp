@@ -1048,6 +1048,62 @@ static int64_t GetQueueSize(Connection &conn, const std::string &target_table) {
 	return 0;
 }
 
+//===--------------------------------------------------------------------===//
+// Progress Reporting
+//===--------------------------------------------------------------------===//
+
+// Ensure progress table exists
+static void EnsureProgressTable(Connection &conn, const std::string &target_table) {
+	std::string progress_table = "_crawl_progress_" + target_table;
+	conn.Query("CREATE TABLE IF NOT EXISTS \"" + progress_table + "\" ("
+	           "updated_at TIMESTAMP PRIMARY KEY DEFAULT NOW(), "
+	           "urls_total BIGINT, "
+	           "urls_completed BIGINT, "
+	           "urls_failed BIGINT, "
+	           "urls_remaining BIGINT, "
+	           "bytes_downloaded BIGINT, "
+	           "current_domain VARCHAR, "
+	           "elapsed_seconds DOUBLE)");
+}
+
+// Update progress
+static void UpdateProgress(Connection &conn, const std::string &target_table,
+                           int64_t urls_total, int64_t urls_completed, int64_t urls_failed,
+                           int64_t bytes_downloaded, const std::string &current_domain,
+                           double elapsed_seconds) {
+	std::string progress_table = "_crawl_progress_" + target_table;
+	int64_t urls_remaining = urls_total - urls_completed - urls_failed;
+
+	conn.Query("INSERT INTO \"" + progress_table + "\" "
+	           "(urls_total, urls_completed, urls_failed, urls_remaining, bytes_downloaded, current_domain, elapsed_seconds) "
+	           "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+	           urls_total, urls_completed, urls_failed, urls_remaining, bytes_downloaded,
+	           current_domain.empty() ? Value() : Value(current_domain), elapsed_seconds);
+}
+
+// Get latest progress
+static void GetLatestProgress(Connection &conn, const std::string &target_table,
+                               int64_t &urls_completed, int64_t &urls_failed, int64_t &bytes_downloaded) {
+	std::string progress_table = "_crawl_progress_" + target_table;
+	auto result = conn.Query("SELECT urls_completed, urls_failed, bytes_downloaded FROM \"" + progress_table + "\" "
+	                          "ORDER BY updated_at DESC LIMIT 1");
+	if (!result->HasError()) {
+		auto chunk = result->Fetch();
+		if (chunk && chunk->size() > 0) {
+			auto comp_val = chunk->GetValue(0, 0);
+			auto fail_val = chunk->GetValue(1, 0);
+			auto bytes_val = chunk->GetValue(2, 0);
+			urls_completed = comp_val.IsNull() ? 0 : comp_val.GetValue<int64_t>();
+			urls_failed = fail_val.IsNull() ? 0 : fail_val.GetValue<int64_t>();
+			bytes_downloaded = bytes_val.IsNull() ? 0 : bytes_val.GetValue<int64_t>();
+			return;
+		}
+	}
+	urls_completed = 0;
+	urls_failed = 0;
+	bytes_downloaded = 0;
+}
+
 // Helper: Discover sitemaps for a hostname (with caching)
 static std::vector<std::string> DiscoverSitemapUrls(ClientContext &context, Connection &conn,
                                                      const std::string &hostname,
@@ -1190,6 +1246,10 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	// Initialize persistent queue for crash recovery
 	EnsureCrawlQueueTable(conn, bind_data.target_table);
 
+	// Initialize progress tracking
+	EnsureProgressTable(conn, bind_data.target_table);
+	auto crawl_start_time = std::chrono::steady_clock::now();
+
 	// Check for existing queued URLs (resume from previous run)
 	auto queued_entries = LoadQueuedUrls(conn, bind_data.target_table);
 	bool is_resume = !queued_entries.empty();
@@ -1306,6 +1366,11 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	}
 
 	int64_t rows_changed = 0;
+	int64_t urls_failed = 0;
+	int64_t bytes_downloaded = 0;
+	int64_t urls_total = static_cast<int64_t>(url_queue.size());
+	int64_t progress_counter = 0;
+	std::string current_domain;
 
 	// Process URL priority queue with retry logic
 	while (!url_queue.empty() && !g_shutdown_requested) {
@@ -1329,6 +1394,7 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 		std::string domain = ExtractDomain(entry.url);
 		std::string path = ExtractPath(entry.url);
+		current_domain = domain;
 
 		auto &domain_state = domain_states[domain];
 
@@ -1523,7 +1589,10 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 			if (!update_result->HasError()) {
 				rows_changed++;
+				bytes_downloaded += static_cast<int64_t>(response.body.size());
 				RemoveFromQueue(conn, bind_data.target_table, entry.url);
+			} else {
+				urls_failed++;
 			}
 		} else {
 			// INSERT new row
@@ -1542,10 +1611,28 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 			if (!insert_result->HasError()) {
 				rows_changed++;
+				bytes_downloaded += static_cast<int64_t>(response.body.size());
 				RemoveFromQueue(conn, bind_data.target_table, entry.url);
+			} else {
+				urls_failed++;
 			}
 		}
+
+		// Update progress every 10 URLs
+		progress_counter++;
+		if (progress_counter % 10 == 0) {
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+			    std::chrono::steady_clock::now() - crawl_start_time).count() / 1000.0;
+			UpdateProgress(conn, bind_data.target_table, urls_total, rows_changed, urls_failed,
+			               bytes_downloaded, current_domain, elapsed);
+		}
 	}
+
+	// Final progress update
+	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+	    std::chrono::steady_clock::now() - crawl_start_time).count() / 1000.0;
+	UpdateProgress(conn, bind_data.target_table, urls_total, rows_changed, urls_failed,
+	               bytes_downloaded, "", elapsed);
 
 	global_state.rows_inserted = rows_changed;
 
