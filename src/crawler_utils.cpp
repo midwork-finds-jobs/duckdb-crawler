@@ -413,4 +413,53 @@ bool IsContentTypeAcceptable(const std::string &content_type,
 	return true;
 }
 
+//===--------------------------------------------------------------------===//
+// SQL Safety Utilities
+//===--------------------------------------------------------------------===//
+
+bool IsValidSqlIdentifier(const std::string &identifier) {
+	if (identifier.empty() || identifier.length() > 128) {
+		return false;
+	}
+
+	// First character must be letter or underscore
+	char first = identifier[0];
+	if (!std::isalpha(first) && first != '_') {
+		return false;
+	}
+
+	// Rest must be alphanumeric, underscore, or period (for schema.table)
+	for (char c : identifier) {
+		if (!std::isalnum(c) && c != '_' && c != '.') {
+			return false;
+		}
+	}
+
+	// Don't allow consecutive periods or start/end with period
+	if (identifier.front() == '.' || identifier.back() == '.') {
+		return false;
+	}
+	if (identifier.find("..") != std::string::npos) {
+		return false;
+	}
+
+	return true;
+}
+
+std::string QuoteSqlIdentifier(const std::string &identifier) {
+	// Escape any embedded double quotes by doubling them
+	std::string escaped;
+	escaped.reserve(identifier.length() + 4);
+	escaped += '"';
+	for (char c : identifier) {
+		if (c == '"') {
+			escaped += "\"\"";
+		} else {
+			escaped += c;
+		}
+	}
+	escaped += '"';
+	return escaped;
+}
+
 } // namespace duckdb

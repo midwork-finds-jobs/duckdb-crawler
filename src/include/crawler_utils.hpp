@@ -85,4 +85,15 @@ bool IsContentTypeAcceptable(const std::string &content_type,
                              const std::string &accept_types,
                              const std::string &reject_types);
 
+//===--------------------------------------------------------------------===//
+// SQL Safety Utilities
+//===--------------------------------------------------------------------===//
+
+// Validate identifier (table/column name) for SQL safety
+// Allows: alphanumeric, underscore, period (schema.table), max 128 chars
+bool IsValidSqlIdentifier(const std::string &identifier);
+
+// Quote identifier for safe use in SQL (double quotes, escape embedded quotes)
+std::string QuoteSqlIdentifier(const std::string &identifier);
+
 } // namespace duckdb

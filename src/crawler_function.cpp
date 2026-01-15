@@ -598,6 +598,13 @@ static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunct
 		                      std::to_string(input.inputs.size()) + ")");
 	}
 
+	// Validate table name for SQL safety
+	if (!IsValidSqlIdentifier(bind_data->target_table)) {
+		throw BinderException("Invalid table name: '" + bind_data->target_table +
+		                      "'. Table names must start with letter/underscore and contain only "
+		                      "alphanumeric characters, underscores, or periods (for schema.table)");
+	}
+
 	// Return schema: just count of rows changed
 	names.emplace_back("Count");
 	return_types.emplace_back(LogicalType::BIGINT);
@@ -704,7 +711,7 @@ static double ChangefreqToHours(const std::string &changefreq) {
 static bool IsUrlStale(Connection &conn, const std::string &url, const std::string &target_table) {
 	// Get crawled_at from target table
 	auto crawled_result = conn.Query(
-	    "SELECT crawled_at FROM " + target_table + " WHERE url = $1", url);
+	    "SELECT crawled_at FROM " + QuoteSqlIdentifier(target_table) + " WHERE url = $1", url);
 
 	if (crawled_result->HasError()) {
 		return false;  // Can't determine, assume not stale
@@ -914,9 +921,11 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 
 	int64_t rows_changed = 0;
 
+	auto quoted_table = QuoteSqlIdentifier(target_table);
+
 	for (const auto &result : batch) {
 		if (result.is_update) {
-			auto update_sql = "UPDATE " + target_table +
+			auto update_sql = "UPDATE " + quoted_table +
 			                  " SET surt_key = $2, http_status = $3, body = $4, content_type = $5, "
 			                  "elapsed_ms = $6, crawled_at = " + result.timestamp_expr + ", error = $7, "
 			                  "etag = $8, last_modified = $9, content_hash = $10, "
@@ -938,7 +947,7 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 				rows_changed++;
 			}
 		} else {
-			auto insert_sql = "INSERT INTO " + target_table +
+			auto insert_sql = "INSERT INTO " + quoted_table +
 			                  " (url, surt_key, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash, final_url, redirect_count) "
 			                  "VALUES ($1, $2, $3, $4, $5, $6, " + result.timestamp_expr + ", $7, $8, $9, $10, $11, $12)";
 
@@ -966,7 +975,7 @@ static int64_t FlushBatch(Connection &conn, const std::string &target_table,
 //===--------------------------------------------------------------------===//
 // Ensure target table exists for crawl results
 static void EnsureTargetTable(Connection &conn, const std::string &target_table) {
-	conn.Query("CREATE TABLE IF NOT EXISTS \"" + target_table + "\" ("
+	conn.Query("CREATE TABLE IF NOT EXISTS " + QuoteSqlIdentifier(target_table) + " ("
 	           "url VARCHAR PRIMARY KEY, "
 	           "surt_key VARCHAR, "
 	           "http_status INTEGER, "
@@ -1952,7 +1961,7 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 
 	// Get existing URLs from target table
 	std::set<std::string> existing_urls;
-	auto existing_query = conn.Query("SELECT DISTINCT url FROM " + bind_data.target_table);
+	auto existing_query = conn.Query("SELECT DISTINCT url FROM " + QuoteSqlIdentifier(bind_data.target_table));
 	if (!existing_query->HasError()) {
 		while (auto chunk = existing_query->Fetch()) {
 			for (idx_t i = 0; i < chunk->size(); i++) {
@@ -2112,6 +2121,10 @@ static unique_ptr<FunctionData> StopCrawlBind(ClientContext &context, TableFunct
 
 	if (input.inputs.size() >= 1) {
 		bind_data->target_table = StringValue::Get(input.inputs[0]);
+		// Validate table name for consistency
+		if (!IsValidSqlIdentifier(bind_data->target_table)) {
+			throw BinderException("Invalid table name: '" + bind_data->target_table + "'");
+		}
 	}
 
 	// Return status message
