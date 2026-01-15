@@ -1,5 +1,7 @@
 # DuckDB Crawler Extension - Developer Guide
 
+**See also:** [REQUIREMENTS.md](REQUIREMENTS.md) for behavioral requirements (rate limiting, 429 handling, robots.txt compliance, etc.)
+
 ## Build Commands
 
 ```bash

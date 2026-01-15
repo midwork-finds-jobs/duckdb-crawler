@@ -17,6 +17,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <sstream>
 #include <unordered_map>
 #include <queue>
@@ -89,6 +90,52 @@ static CrawlErrorType ClassifyError(int status_code, const std::string &error_ms
 		return CrawlErrorType::NETWORK_TIMEOUT;  // Default network error
 	}
 	return CrawlErrorType::NONE;
+}
+
+// Load HTTP settings from DuckDB configuration
+static void LoadHttpSettingsFromDuckDB(Connection &conn) {
+	HttpSettings settings;
+
+	auto result = conn.Query(R"(
+		SELECT
+			current_setting('http_timeout')::INT as timeout,
+			current_setting('http_keep_alive')::BOOL as keep_alive,
+			current_setting('http_proxy') as proxy,
+			current_setting('http_proxy_username') as proxy_user,
+			current_setting('http_proxy_password') as proxy_pass
+	)");
+
+	if (!result->HasError() && result->RowCount() > 0) {
+		auto chunk = result->Fetch();
+		if (chunk && chunk->size() > 0) {
+			auto timeout_val = chunk->GetValue(0, 0);
+			if (!timeout_val.IsNull()) {
+				settings.timeout_seconds = timeout_val.GetValue<int>();
+			}
+
+			auto keep_alive_val = chunk->GetValue(1, 0);
+			if (!keep_alive_val.IsNull()) {
+				settings.keep_alive = keep_alive_val.GetValue<bool>();
+			}
+
+			auto proxy_val = chunk->GetValue(2, 0);
+			if (!proxy_val.IsNull()) {
+				settings.proxy = StringValue::Get(proxy_val);
+			}
+
+			auto proxy_user_val = chunk->GetValue(3, 0);
+			if (!proxy_user_val.IsNull()) {
+				settings.proxy_username = StringValue::Get(proxy_user_val);
+			}
+
+			auto proxy_pass_val = chunk->GetValue(4, 0);
+			if (!proxy_pass_val.IsNull()) {
+				settings.proxy_password = StringValue::Get(proxy_pass_val);
+			}
+		}
+	}
+
+	SetHttpSettings(settings);
 }
 
 // Decompress gzip data (for .gz sitemap files)
@@ -202,6 +249,8 @@ static void SignalHandler(int signum) {
 
 // Domain state for rate limiting and 429 handling
 struct DomainState {
+	mutable std::mutex mutex;  // Per-domain lock for thread safety
+
 	std::chrono::steady_clock::time_point last_crawl_time;
 	double crawl_delay_seconds = 1.0;
 	RobotsRules rules;
@@ -222,6 +271,64 @@ struct DomainState {
 	double average_response_ms = 0;  // Exponential moving average
 	double min_crawl_delay_seconds = 0;  // Floor from robots.txt or default
 	int response_count = 0;  // Number of responses for EMA warmup
+
+	// Default constructor
+	DomainState() = default;
+
+	// Copy constructor - copies data but gets new mutex
+	DomainState(const DomainState &other)
+	    : last_crawl_time(other.last_crawl_time),
+	      crawl_delay_seconds(other.crawl_delay_seconds),
+	      rules(other.rules),
+	      robots_fetched(other.robots_fetched),
+	      urls_crawled(other.urls_crawled),
+	      urls_failed(other.urls_failed),
+	      urls_skipped(other.urls_skipped),
+	      blocked_until(other.blocked_until),
+	      consecutive_429s(other.consecutive_429s),
+	      has_crawl_delay(other.has_crawl_delay),
+	      active_requests(other.active_requests),
+	      average_response_ms(other.average_response_ms),
+	      min_crawl_delay_seconds(other.min_crawl_delay_seconds),
+	      response_count(other.response_count) {}
+
+	// Move constructor - moves data but gets new mutex
+	DomainState(DomainState &&other) noexcept
+	    : last_crawl_time(std::move(other.last_crawl_time)),
+	      crawl_delay_seconds(other.crawl_delay_seconds),
+	      rules(std::move(other.rules)),
+	      robots_fetched(other.robots_fetched),
+	      urls_crawled(other.urls_crawled),
+	      urls_failed(other.urls_failed),
+	      urls_skipped(other.urls_skipped),
+	      blocked_until(std::move(other.blocked_until)),
+	      consecutive_429s(other.consecutive_429s),
+	      has_crawl_delay(other.has_crawl_delay),
+	      active_requests(other.active_requests),
+	      average_response_ms(other.average_response_ms),
+	      min_crawl_delay_seconds(other.min_crawl_delay_seconds),
+	      response_count(other.response_count) {}
+
+	// Copy assignment - copies data but mutex stays
+	DomainState& operator=(const DomainState &other) {
+		if (this != &other) {
+			last_crawl_time = other.last_crawl_time;
+			crawl_delay_seconds = other.crawl_delay_seconds;
+			rules = other.rules;
+			robots_fetched = other.robots_fetched;
+			urls_crawled = other.urls_crawled;
+			urls_failed = other.urls_failed;
+			urls_skipped = other.urls_skipped;
+			blocked_until = other.blocked_until;
+			consecutive_429s = other.consecutive_429s;
+			has_crawl_delay = other.has_crawl_delay;
+			active_requests = other.active_requests;
+			average_response_ms = other.average_response_ms;
+			min_crawl_delay_seconds = other.min_crawl_delay_seconds;
+			response_count = other.response_count;
+		}
+		return *this;
+	}
 };
 
 // URL queue entry with retry tracking and scheduling
@@ -241,6 +348,101 @@ struct UrlQueueEntry {
 	bool operator>(const UrlQueueEntry &other) const {
 		return earliest_fetch > other.earliest_fetch;
 	}
+};
+
+//===--------------------------------------------------------------------===//
+// Thread-Safe Data Structures for Multi-Threaded Crawling
+//===--------------------------------------------------------------------===//
+
+// Thread-safe URL priority queue with condition variable for worker coordination
+class ThreadSafeUrlQueue {
+public:
+	void Push(UrlQueueEntry entry) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		queue_.push(std::move(entry));
+		cv_.notify_one();
+	}
+
+	bool TryPop(UrlQueueEntry &entry) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (queue_.empty()) return false;
+		entry = std::move(const_cast<UrlQueueEntry&>(queue_.top()));
+		queue_.pop();
+		return true;
+	}
+
+	bool WaitAndPop(UrlQueueEntry &entry, std::chrono::milliseconds timeout) {
+		std::unique_lock<std::mutex> lock(mutex_);
+		if (!cv_.wait_for(lock, timeout, [this] { return !queue_.empty() || shutdown_; })) {
+			return false;
+		}
+		if (shutdown_ && queue_.empty()) return false;
+		entry = std::move(const_cast<UrlQueueEntry&>(queue_.top()));
+		queue_.pop();
+		return true;
+	}
+
+	void Shutdown() {
+		std::lock_guard<std::mutex> lock(mutex_);
+		shutdown_ = true;
+		cv_.notify_all();
+	}
+
+	bool Empty() const {
+		std::lock_guard<std::mutex> lock(mutex_);
+		return queue_.empty();
+	}
+
+	size_t Size() const {
+		std::lock_guard<std::mutex> lock(mutex_);
+		return queue_.size();
+	}
+
+private:
+	mutable std::mutex mutex_;
+	std::condition_variable cv_;
+	std::priority_queue<UrlQueueEntry, std::vector<UrlQueueEntry>, std::greater<UrlQueueEntry>> queue_;
+	bool shutdown_ = false;
+};
+
+// Thread-safe map for domain states using unique_ptr to handle non-movable DomainState
+class ThreadSafeDomainMap {
+public:
+	DomainState& GetOrCreate(const std::string &domain) {
+		std::lock_guard<std::mutex> lock(map_mutex_);
+		auto it = domain_states_.find(domain);
+		if (it == domain_states_.end()) {
+			auto result = domain_states_.emplace(domain, make_uniq<DomainState>());
+			return *result.first->second;
+		}
+		return *it->second;
+	}
+
+	DomainState* TryGet(const std::string &domain) {
+		std::lock_guard<std::mutex> lock(map_mutex_);
+		auto it = domain_states_.find(domain);
+		return it != domain_states_.end() ? it->second.get() : nullptr;
+	}
+
+	// Copy domain state from SitemapDiscoveryResult (called during setup)
+	void InitializeFromDiscovery(const std::string &domain, const DomainState &src) {
+		std::lock_guard<std::mutex> lock(map_mutex_);
+		auto &state = domain_states_[domain];
+		if (!state) {
+			state = make_uniq<DomainState>();
+		}
+		// Copy fields (but not mutex)
+		state->last_crawl_time = src.last_crawl_time;
+		state->crawl_delay_seconds = src.crawl_delay_seconds;
+		state->rules = src.rules;
+		state->robots_fetched = src.robots_fetched;
+		state->has_crawl_delay = src.has_crawl_delay;
+		state->min_crawl_delay_seconds = src.min_crawl_delay_seconds;
+	}
+
+private:
+	std::mutex map_mutex_;
+	std::unordered_map<std::string, unique_ptr<DomainState>> domain_states_;
 };
 
 // Fibonacci backoff: 3, 3, 6, 9, 15, 24, 39, 63, 102, 165, 267...
@@ -940,6 +1142,8 @@ struct CrawlIntoBindData : public TableFunctionData {
 	int max_crawl_depth = 10;
 	bool respect_nofollow = true;
 	bool follow_canonical = true;
+	// Multi-threading
+	int num_threads = 0;  // 0 = auto (hardware_concurrency)
 };
 
 struct CrawlIntoGlobalState : public GlobalTableFunctionState {
@@ -965,8 +1169,8 @@ static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunct
 	// Order: statement_type, source_query, target_table, user_agent, delays..., url_filter, sitemap_cache_hours,
 	//        update_stale, max_retry_backoff_seconds, max_parallel_per_domain, max_total_connections, max_response_bytes,
 	//        compress, accept_content_types, reject_content_types, follow_links, allow_subdomains, max_crawl_pages,
-	//        max_crawl_depth, respect_nofollow, follow_canonical
-	if (input.inputs.size() >= 26) {
+	//        max_crawl_depth, respect_nofollow, follow_canonical, num_threads
+	if (input.inputs.size() >= 27) {
 		bind_data->statement_type = input.inputs[0].GetValue<int32_t>();
 		bind_data->source_query = StringValue::Get(input.inputs[1]);
 		bind_data->target_table = StringValue::Get(input.inputs[2]);
@@ -993,8 +1197,9 @@ static unique_ptr<FunctionData> CrawlIntoBind(ClientContext &context, TableFunct
 		bind_data->max_crawl_depth = input.inputs[23].GetValue<int>();
 		bind_data->respect_nofollow = input.inputs[24].GetValue<bool>();
 		bind_data->follow_canonical = input.inputs[25].GetValue<bool>();
+		bind_data->num_threads = input.inputs[26].GetValue<int>();
 	} else {
-		throw BinderException("crawl_into_internal: insufficient parameters (expected 26, got " +
+		throw BinderException("crawl_into_internal: insufficient parameters (expected 27, got " +
 		                      std::to_string(input.inputs.size()) + ")");
 	}
 
@@ -1813,6 +2018,14 @@ static SitemapDiscoveryResult DiscoverSitemapUrlsThreadSafe(DatabaseInstance &db
 		}
 	}
 
+	// For PAGE_URL type: if no sitemap found, at least include the original URL for crawling
+	// This ensures a simple "CRAWL (SELECT 'https://example.com/')" works
+	if (parsed.type == SiteInputType::PAGE_URL && result.urls.empty()) {
+		result.urls.push_back(parsed.start_url);
+		// Don't cache "not_found" since we're returning the original URL
+		return result;
+	}
+
 	// Nothing found - cache negative result (but not for direct sitemap - those should just return empty)
 	if (parsed.type != SiteInputType::DIRECT_SITEMAP) {
 		UpdateDiscoveryStatus(conn, parsed.hostname, "not_found", 0);
@@ -1928,6 +2141,285 @@ static std::vector<std::string> DiscoverSitemapUrls(ClientContext &context, Conn
 	return urls;
 }
 
+//===--------------------------------------------------------------------===//
+// Multi-Threaded Crawl Worker
+//===--------------------------------------------------------------------===//
+
+// Worker function for parallel crawling
+// Processes URLs from queue, respects rate limits, and batches results
+static void CrawlWorker(
+    int worker_id,
+    ThreadSafeUrlQueue &url_queue,
+    ThreadSafeDomainMap &domain_states,
+    const CrawlIntoBindData &bind_data,
+    std::vector<BatchCrawlEntry> &result_batch,
+    std::mutex &batch_mutex,
+    std::mutex &db_mutex,
+    Connection &conn,
+    std::atomic<int64_t> &rows_changed,
+    std::atomic<int64_t> &processed_urls,
+    std::atomic<bool> &should_stop,
+    std::atomic<int> &in_flight
+) {
+	const size_t LOCAL_BATCH_SIZE = 20;
+	std::vector<BatchCrawlEntry> local_batch;
+	local_batch.reserve(LOCAL_BATCH_SIZE);
+
+	while (!should_stop.load()) {
+		UrlQueueEntry entry("", 0, false);
+		if (!url_queue.WaitAndPop(entry, std::chrono::milliseconds(100))) {
+			if (url_queue.Empty() && in_flight.load() == 0) {
+				break;  // Queue exhausted and no one processing, exit worker
+			}
+			continue;  // Timeout, try again
+		}
+
+		// Track in-flight requests for shutdown coordination
+		in_flight.fetch_add(1);
+
+		// Note: We don't check should_stop here because we already popped the entry.
+		// We should process it before exiting to avoid losing work.
+
+		std::string domain = ExtractDomain(entry.url);
+		std::string path = ExtractPath(entry.url);
+		auto &domain_state = domain_states.GetOrCreate(domain);
+
+		// Check if domain is blocked (429 backoff)
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			auto now = std::chrono::steady_clock::now();
+			if (domain_state.blocked_until > now) {
+				// Re-queue with later time
+				entry.earliest_fetch = domain_state.blocked_until;
+				if (entry.retry_count < 5) {
+					entry.retry_count++;
+					url_queue.Push(std::move(entry));
+				}
+				in_flight.fetch_sub(1);
+				continue;
+			}
+		}
+
+		// Fetch robots.txt if needed
+		bool robots_allow = true;
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			if (bind_data.respect_robots_txt && !domain_state.robots_fetched) {
+				// Release lock while fetching
+			}
+		}
+
+		// Fetch robots.txt outside lock if needed
+		if (bind_data.respect_robots_txt) {
+			bool need_fetch = false;
+			{
+				std::lock_guard<std::mutex> lock(domain_state.mutex);
+				need_fetch = !domain_state.robots_fetched;
+			}
+
+			if (need_fetch) {
+				std::string robots_url = "https://" + domain + "/robots.txt";
+				RetryConfig retry_config;
+				auto response = HttpClient::Fetch(robots_url, retry_config, bind_data.user_agent);
+
+				std::lock_guard<std::mutex> lock(domain_state.mutex);
+				if (!domain_state.robots_fetched) {  // Double-check after acquiring lock
+					if (response.success) {
+						auto robots_data = RobotsParser::Parse(response.body);
+						domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, bind_data.user_agent);
+						domain_state.has_crawl_delay = domain_state.rules.HasCrawlDelay();
+						if (domain_state.has_crawl_delay) {
+							domain_state.crawl_delay_seconds = domain_state.rules.GetEffectiveDelay();
+						} else {
+							domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
+						}
+						domain_state.crawl_delay_seconds = std::max(domain_state.crawl_delay_seconds, bind_data.min_crawl_delay);
+						domain_state.crawl_delay_seconds = std::min(domain_state.crawl_delay_seconds, bind_data.max_crawl_delay);
+						domain_state.min_crawl_delay_seconds = domain_state.crawl_delay_seconds;
+					} else {
+						domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
+						domain_state.min_crawl_delay_seconds = bind_data.default_crawl_delay;
+						domain_state.has_crawl_delay = false;
+					}
+					domain_state.robots_fetched = true;
+				}
+			}
+		}
+
+		// Check robots.txt rules
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			if (bind_data.respect_robots_txt && !RobotsParser::IsAllowed(domain_state.rules, path)) {
+				robots_allow = false;
+			}
+		}
+
+		if (!robots_allow) {
+			if (bind_data.log_skipped) {
+				std::string surt_key = GenerateSurtKey(entry.url);
+				local_batch.push_back(BatchCrawlEntry{
+					entry.url, surt_key, -1, "", "", 0, "NOW()",
+					"robots.txt disallow", "", "", "", "", 0, entry.is_update
+				});
+			}
+			processed_urls.fetch_add(1);
+			in_flight.fetch_sub(1);
+			continue;
+		}
+
+		// Enforce per-domain rate limit
+		// IMPORTANT: Update last_crawl_time while holding lock to prevent race condition
+		// where multiple threads see "sufficient delay" and all proceed simultaneously
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			auto now = std::chrono::steady_clock::now();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+			    now - domain_state.last_crawl_time).count();
+			auto required_delay_ms = static_cast<int64_t>(domain_state.crawl_delay_seconds * 1000);
+
+			if (elapsed < required_delay_ms) {
+				// Re-queue with future timestamp
+				entry.earliest_fetch = domain_state.last_crawl_time +
+				    std::chrono::milliseconds(required_delay_ms);
+				url_queue.Push(std::move(entry));
+				in_flight.fetch_sub(1);
+				continue;
+			}
+
+			// Reserve this slot by updating last_crawl_time NOW
+			// This prevents other threads from also seeing "sufficient delay"
+			domain_state.last_crawl_time = now;
+		}
+
+		// Wait for global connection limit (but don't check should_stop - we have the entry, process it)
+		while (g_active_connections >= bind_data.max_total_connections) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		// Fetch URL
+		g_active_connections++;
+		auto fetch_start = std::chrono::steady_clock::now();
+		RetryConfig retry_config;
+		auto response = HttpClient::Fetch(entry.url, retry_config, bind_data.user_agent, bind_data.compress);
+		auto fetch_end = std::chrono::steady_clock::now();
+		auto fetch_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fetch_end - fetch_start).count();
+		g_active_connections--;
+
+		// Update domain state
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			domain_state.last_crawl_time = fetch_end;
+		}
+
+		// Check response size limit
+		if (response.success && static_cast<int64_t>(response.body.size()) > bind_data.max_response_bytes) {
+			response.success = false;
+			response.error = "Response too large: " + std::to_string(response.body.size()) + " bytes";
+			response.body.clear();
+		}
+
+		// Check content-type filter
+		if (response.success && !IsContentTypeAcceptable(response.content_type,
+		                                                   bind_data.accept_content_types,
+		                                                   bind_data.reject_content_types)) {
+			response.success = false;
+			response.error = "Content-Type rejected: " + response.content_type;
+			response.body.clear();
+		}
+
+		// Check for meta robots noindex
+		if (response.success && bind_data.respect_robots_txt &&
+		    response.content_type.find("text/html") != std::string::npos &&
+		    LinkParser::HasNoIndexMeta(response.body)) {
+			response.body.clear();
+		}
+
+		// Check for retryable errors (429, 5XX, network errors)
+		bool is_retryable = (response.status_code == 429 ||
+		                     (response.status_code >= 500 && response.status_code <= 504) ||
+		                     response.status_code <= 0);
+
+		if (is_retryable) {
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			domain_state.consecutive_429s++;
+
+			int backoff_seconds;
+			if (response.status_code == 429 && !response.retry_after.empty()) {
+				backoff_seconds = HttpClient::ParseRetryAfter(response.retry_after) / 1000;
+				if (backoff_seconds <= 0) {
+					backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
+					                                           bind_data.max_retry_backoff_seconds);
+				}
+			} else {
+				backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
+				                                           bind_data.max_retry_backoff_seconds);
+			}
+
+			domain_state.blocked_until = std::chrono::steady_clock::now() +
+			                              std::chrono::seconds(backoff_seconds);
+
+			if (entry.retry_count < 5) {
+				entry.retry_count++;
+				entry.earliest_fetch = domain_state.blocked_until;
+				url_queue.Push(std::move(entry));
+			}
+			in_flight.fetch_sub(1);
+			continue;
+		}
+
+		// Success - clear consecutive error count, unblock domain, and update adaptive delay
+		{
+			std::lock_guard<std::mutex> lock(domain_state.mutex);
+			domain_state.consecutive_429s = 0;
+			// Clear blocked_until on success - domain is responding normally again
+			domain_state.blocked_until = std::chrono::steady_clock::time_point{};
+			UpdateAdaptiveDelay(domain_state, static_cast<double>(fetch_elapsed_ms), bind_data.max_crawl_delay);
+		}
+
+		// Get timestamp
+		std::string validated_date = ParseAndValidateServerDate(response.server_date);
+		std::string timestamp_expr = validated_date.empty() ? "NOW()" : ("'" + validated_date + "'::TIMESTAMP");
+
+		// Generate SURT key and content hash
+		std::string surt_key = GenerateSurtKey(entry.url);
+		std::string content_hash = GenerateContentHash(response.body);
+
+		// Add to local batch
+		local_batch.push_back(BatchCrawlEntry{
+			entry.url, surt_key, response.status_code, response.body, response.content_type,
+			fetch_elapsed_ms, timestamp_expr, response.error, response.etag, response.last_modified,
+			content_hash, response.final_url, response.redirect_count, entry.is_update
+		});
+
+		processed_urls.fetch_add(1);
+
+		// Flush local batch to shared batch
+		if (local_batch.size() >= LOCAL_BATCH_SIZE) {
+			std::lock_guard<std::mutex> lock(batch_mutex);
+			for (auto &e : local_batch) {
+				result_batch.push_back(std::move(e));
+			}
+			local_batch.clear();
+
+			// Flush shared batch if large enough
+			if (result_batch.size() >= 100) {
+				std::lock_guard<std::mutex> db_lock(db_mutex);
+				rows_changed.fetch_add(FlushBatch(conn, bind_data.target_table, result_batch));
+			}
+		}
+
+		in_flight.fetch_sub(1);
+	}
+
+	// Flush remaining local batch
+	if (!local_batch.empty()) {
+		std::lock_guard<std::mutex> lock(batch_mutex);
+		for (auto &e : local_batch) {
+			result_batch.push_back(std::move(e));
+		}
+	}
+}
+
 static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &bind_data = data.bind_data->CastNoConst<CrawlIntoBindData>();
 	auto &global_state = data.global_state->Cast<CrawlIntoGlobalState>();
@@ -1941,6 +2433,9 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 	global_state.executed = true;
 
 	Connection conn(*context.db);
+
+	// Load HTTP settings from DuckDB configuration (timeout, proxy, etc.)
+	LoadHttpSettingsFromDuckDB(conn);
 
 	// Execute source query to get URLs or hostnames
 	auto query_result = conn.Query(bind_data.source_query);
@@ -2074,304 +2569,129 @@ static void CrawlIntoFunction(ClientContext &context, TableFunctionInput &data, 
 		}
 	}
 
-	// Build URL priority queue: sorted by earliest_fetch time
-	// Using greater<> so earliest times come first (min-heap)
-	std::priority_queue<UrlQueueEntry, std::vector<UrlQueueEntry>, std::greater<UrlQueueEntry>> url_queue;
+	// Determine number of threads - use DuckDB's thread setting if not specified
+	int num_threads = bind_data.num_threads;
+	if (num_threads <= 0) {
+		auto thread_result = conn.Query("SELECT current_setting('threads')::INT");
+		if (!thread_result->HasError() && thread_result->RowCount() > 0) {
+			auto chunk = thread_result->Fetch();
+			if (chunk && chunk->size() > 0) {
+				num_threads = chunk->GetValue(0, 0).GetValue<int>();
+			}
+		}
+	}
+	num_threads = std::max(1, std::min(num_threads, 32));  // Clamp to 1-32
 
+	// Build thread-safe URL queue
+	ThreadSafeUrlQueue url_queue;
 	auto now = std::chrono::steady_clock::now();
 
-	// Build queue from discovered URLs
+	int64_t urls_added = 0;
 	for (const auto &url : urls) {
 		if (existing_urls.find(url) == existing_urls.end()) {
-			// New URL - can be fetched immediately
-			url_queue.push(UrlQueueEntry(url, 0, false, now));
+			url_queue.Push(UrlQueueEntry(url, 0, false, now));
+			urls_added++;
 		}
 	}
 
 	// If update_stale enabled, check existing URLs for staleness and add them
 	if (bind_data.update_stale && !existing_urls.empty()) {
-		// Ensure sitemap cache exists for staleness checks
 		EnsureSitemapCacheTable(conn);
-
 		for (const auto &url : urls) {
 			if (existing_urls.find(url) != existing_urls.end()) {
-				// Existing URL - check if stale
 				if (IsUrlStale(conn, url, bind_data.target_table)) {
-					url_queue.push(UrlQueueEntry(url, 0, true, now));  // is_update = true
+					url_queue.Push(UrlQueueEntry(url, 0, true, now));
+					urls_added++;
 				}
 			}
 		}
 	}
 
-	if (url_queue.empty()) {
+	if (urls_added == 0) {
 		output.SetCardinality(1);
 		output.SetValue(0, 0, Value::BIGINT(0));
 		return;
 	}
 
-	int64_t rows_changed = 0;
-
-	// Batch insert configuration
-	const size_t BATCH_SIZE = 100;
-	std::vector<BatchCrawlEntry> result_batch;
-	result_batch.reserve(BATCH_SIZE);
-	int64_t urls_total = static_cast<int64_t>(url_queue.size());
-
 	// Set total for progress bar
-	global_state.total_urls.store(urls_total);
+	global_state.total_urls.store(urls_added);
 	global_state.processed_urls.store(0);
 
-	// Process URL priority queue with retry logic
-	// Check both global shutdown and specific crawl stop signal
-	auto should_stop = [&]() {
+	// Create thread-safe domain map and initialize from discovery results
+	ThreadSafeDomainMap thread_safe_domain_states;
+	for (const auto &kv : domain_states) {
+		thread_safe_domain_states.InitializeFromDiscovery(kv.first, kv.second);
+	}
+
+	// Shared state for workers
+	std::vector<BatchCrawlEntry> result_batch;
+	result_batch.reserve(100);
+	std::mutex batch_mutex;
+	std::mutex db_mutex;
+	std::atomic<int64_t> rows_changed{0};
+	std::atomic<bool> should_stop{false};
+	std::atomic<int> in_flight{0};  // Number of URLs currently being processed
+
+	// Check shutdown lambda
+	auto check_stop = [&]() {
 		return g_shutdown_requested || ShouldStopBackgroundCrawl(bind_data.target_table);
 	};
 
-	while (!url_queue.empty() && !should_stop()) {
-		auto entry = url_queue.top();
-		url_queue.pop();
-
-		// Wait if the entry's earliest fetch time is in the future
-		auto now = std::chrono::steady_clock::now();
-		if (entry.earliest_fetch > now) {
-			auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-			    entry.earliest_fetch - now).count();
-			if (wait_ms > 0 && wait_ms < 60000) {  // Wait max 60s at a time
-				std::this_thread::sleep_for(std::chrono::milliseconds(wait_ms));
-			}
-			now = std::chrono::steady_clock::now();
-		}
-
-		if (should_stop()) {
-			break;
-		}
-
-		std::string domain = ExtractDomain(entry.url);
-		std::string path = ExtractPath(entry.url);
-
-		auto &domain_state = domain_states[domain];
-
-		// Check if domain is blocked (429/5XX backoff)
-		if (domain_state.blocked_until > now) {
-			// Domain is blocked - re-queue with updated earliest_fetch if under retry limit
-			if (entry.retry_count < 5) {
-				entry.retry_count++;
-				entry.earliest_fetch = domain_state.blocked_until;
-				url_queue.push(entry);
-			}
-			continue;
-		}
-
-		// Fetch robots.txt if needed (may already be fetched in SITES mode)
-		if (bind_data.respect_robots_txt && !domain_state.robots_fetched) {
-			std::string robots_url = "https://" + domain + "/robots.txt";
-			RetryConfig retry_config;
-
-			auto response = HttpClient::Fetch(robots_url, retry_config, bind_data.user_agent);
-
-			if (response.success) {
-				auto robots_data = RobotsParser::Parse(response.body);
-				domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, bind_data.user_agent);
-
-				// Track if crawl-delay was specified (affects parallel request limit)
-				domain_state.has_crawl_delay = domain_state.rules.HasCrawlDelay();
-
-				if (domain_state.has_crawl_delay) {
-					domain_state.crawl_delay_seconds = domain_state.rules.GetEffectiveDelay();
-				} else {
-					domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
-				}
-
-				domain_state.crawl_delay_seconds = std::max(domain_state.crawl_delay_seconds, bind_data.min_crawl_delay);
-				domain_state.crawl_delay_seconds = std::min(domain_state.crawl_delay_seconds, bind_data.max_crawl_delay);
-				// Set floor for adaptive rate limiting
-				domain_state.min_crawl_delay_seconds = domain_state.crawl_delay_seconds;
-			} else {
-				domain_state.crawl_delay_seconds = bind_data.default_crawl_delay;
-				domain_state.min_crawl_delay_seconds = bind_data.default_crawl_delay;
-				domain_state.has_crawl_delay = false;  // No robots.txt = allow parallel
-			}
-
-			domain_state.robots_fetched = true;
-		}
-
-		// Check robots.txt rules
-		if (bind_data.respect_robots_txt && !RobotsParser::IsAllowed(domain_state.rules, path)) {
-			if (bind_data.log_skipped) {
-				std::string surt_key = GenerateSurtKey(entry.url);
-				auto insert_sql = "INSERT INTO " + bind_data.target_table +
-				                  " (url, surt_key, http_status, body, content_type, elapsed_ms, crawled_at, error, etag, last_modified, content_hash, final_url, redirect_count) "
-				                  "VALUES ($1, $2, $3, NULL, NULL, 0, NOW(), $4, NULL, NULL, NULL, NULL, 0)";
-				auto insert_result = conn.Query(insert_sql, entry.url, surt_key, -1, "robots.txt disallow");
-				if (!insert_result->HasError()) {
-					rows_changed++;
-				}
-			}
-			continue;
-		}
-
-		// Check parallel limit for domains without crawl-delay
-		if (!domain_state.has_crawl_delay) {
-			if (domain_state.active_requests >= bind_data.max_parallel_per_domain) {
-				// Re-queue with small delay to let other domains proceed
-				entry.earliest_fetch = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
-				url_queue.push(entry);
-				continue;
-			}
-			domain_state.active_requests++;
-		} else {
-			// Wait for crawl delay (serial mode for domains with crawl-delay)
-			now = std::chrono::steady_clock::now();
-			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - domain_state.last_crawl_time).count();
-			auto required_delay_ms = static_cast<int64_t>(domain_state.crawl_delay_seconds * 1000);
-
-			if (elapsed < required_delay_ms) {
-				auto wait_time = required_delay_ms - elapsed;
-				std::this_thread::sleep_for(std::chrono::milliseconds(wait_time));
-			}
-		}
-
-		if (should_stop()) {
-			if (!domain_state.has_crawl_delay) {
-				domain_state.active_requests--;
-			}
-			break;
-		}
-
-		// Check global connection limit
-		while (g_active_connections >= bind_data.max_total_connections && !should_stop()) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
-		if (should_stop()) {
-			if (!domain_state.has_crawl_delay) {
-				domain_state.active_requests--;
-			}
-			break;
-		}
-
-		// Fetch URL
-		g_active_connections++;
-		auto fetch_start = std::chrono::steady_clock::now();
-		RetryConfig retry_config;
-		auto response = HttpClient::Fetch(entry.url, retry_config, bind_data.user_agent, bind_data.compress);
-		auto fetch_end = std::chrono::steady_clock::now();
-		auto fetch_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(fetch_end - fetch_start).count();
-		g_active_connections--;
-
-		domain_state.last_crawl_time = fetch_end;
-
-		// Decrement active requests for parallel mode
-		if (!domain_state.has_crawl_delay) {
-			domain_state.active_requests--;
-		}
-
-		// Check response size limit
-		if (response.success && static_cast<int64_t>(response.body.size()) > bind_data.max_response_bytes) {
-			response.success = false;
-			response.error = "Response too large: " + std::to_string(response.body.size()) + " bytes";
-			response.body.clear();  // Don't store oversized content
-		}
-
-		// Check content-type filter
-		if (response.success && !IsContentTypeAcceptable(response.content_type,
-		                                                   bind_data.accept_content_types,
-		                                                   bind_data.reject_content_types)) {
-			response.success = false;
-			response.error = "Content-Type rejected: " + response.content_type;
-			response.body.clear();  // Don't store rejected content
-		}
-
-		// Check for meta robots noindex (only for HTML content)
-		// Respects <meta name="robots" content="noindex"> by not storing body
-		if (response.success && bind_data.respect_robots_txt &&
-		    response.content_type.find("text/html") != std::string::npos &&
-		    LinkParser::HasNoIndexMeta(response.body)) {
-			response.body.clear();  // Don't store noindex content, but keep metadata
-		}
-
-		// Check for retryable errors (429, 5XX, network errors)
-		bool is_retryable = (response.status_code == 429 ||
-		                     (response.status_code >= 500 && response.status_code <= 504) ||
-		                     response.status_code <= 0);
-
-		if (is_retryable) {
-			// Calculate backoff using Fibonacci
-			domain_state.consecutive_429s++;
-
-			int backoff_seconds;
-			if (response.status_code == 429 && !response.retry_after.empty()) {
-				// Use Retry-After header if provided
-				backoff_seconds = HttpClient::ParseRetryAfter(response.retry_after) / 1000;
-				if (backoff_seconds <= 0) {
-					backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
-					                                           bind_data.max_retry_backoff_seconds);
-				}
-			} else {
-				backoff_seconds = FibonacciBackoffSeconds(domain_state.consecutive_429s,
-				                                           bind_data.max_retry_backoff_seconds);
-			}
-
-			// Block domain
-			domain_state.blocked_until = std::chrono::steady_clock::now() +
-			                              std::chrono::seconds(backoff_seconds);
-
-			// Re-queue URL if under retry limit
-			if (entry.retry_count < 5) {
-				entry.retry_count++;
-				entry.earliest_fetch = domain_state.blocked_until;  // Schedule after backoff
-				url_queue.push(entry);
-			}
-			continue;
-		}
-
-		// Success - clear consecutive error count and update adaptive delay
-		domain_state.consecutive_429s = 0;
-		UpdateAdaptiveDelay(domain_state, static_cast<double>(fetch_elapsed_ms), bind_data.max_crawl_delay);
-
-		// Get timestamp - prefer server Date header if valid (within 15 min of local time)
-		std::string validated_date = ParseAndValidateServerDate(response.server_date);
-		std::string timestamp_expr = validated_date.empty() ? "NOW()" : ("'" + validated_date + "'::TIMESTAMP");
-
-		// Generate SURT key and content hash for deduplication
-		std::string surt_key = GenerateSurtKey(entry.url);
-		std::string content_hash = GenerateContentHash(response.body);
-
-		// Add to batch
-		result_batch.push_back(BatchCrawlEntry{
-			entry.url,
-			surt_key,
-			response.status_code,
-			response.body,
-			response.content_type,
-			fetch_elapsed_ms,
-			timestamp_expr,
-			response.error,
-			response.etag,
-			response.last_modified,
-			content_hash,
-			response.final_url,
-			response.redirect_count,
-			entry.is_update
-		});
-
-		// Flush batch if full
-		if (result_batch.size() >= BATCH_SIZE) {
-			rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
-		}
-
-		// Update progress for progress bar
-		global_state.processed_urls.fetch_add(1);
+	// Launch worker threads
+	std::vector<std::thread> workers;
+	workers.reserve(num_threads);
+	for (int i = 0; i < num_threads; i++) {
+		workers.emplace_back(CrawlWorker,
+		    i, std::ref(url_queue), std::ref(thread_safe_domain_states), std::ref(bind_data),
+		    std::ref(result_batch), std::ref(batch_mutex), std::ref(db_mutex), std::ref(conn),
+		    std::ref(rows_changed), std::ref(global_state.processed_urls), std::ref(should_stop),
+		    std::ref(in_flight));
 	}
 
-	// Flush any remaining results
-	if (!result_batch.empty()) {
-		rows_changed += FlushBatch(conn, bind_data.target_table, result_batch);
+	// Monitor for shutdown while workers run
+	// Exit when queue is empty AND no in-flight requests (all workers idle)
+	while (true) {
+		if (check_stop()) {
+			should_stop.store(true);
+			url_queue.Shutdown();
+			break;
+		}
+
+		// Check if all work is done: queue empty AND no in-flight requests
+		if (url_queue.Empty() && in_flight.load() == 0) {
+			// Double check after brief wait to avoid race
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			if (url_queue.Empty() && in_flight.load() == 0) {
+				should_stop.store(true);
+				url_queue.Shutdown();
+				break;
+			}
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 	}
 
-	global_state.rows_inserted = rows_changed;
+	// Signal shutdown and wait for workers
+	should_stop.store(true);
+	url_queue.Shutdown();
+	for (auto &t : workers) {
+		if (t.joinable()) {
+			t.join();
+		}
+	}
+
+	// Final flush of any remaining results
+	{
+		std::lock_guard<std::mutex> lock(batch_mutex);
+		if (!result_batch.empty()) {
+			std::lock_guard<std::mutex> db_lock(db_mutex);
+			rows_changed.fetch_add(FlushBatch(conn, bind_data.target_table, result_batch));
+		}
+	}
+
+	global_state.rows_inserted = rows_changed.load();
 
 	output.SetCardinality(1);
-	output.SetValue(0, 0, Value::BIGINT(rows_changed));
+	output.SetValue(0, 0, Value::BIGINT(rows_changed.load()));
 }
 
 //===--------------------------------------------------------------------===//

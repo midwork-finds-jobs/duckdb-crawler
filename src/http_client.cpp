@@ -21,11 +21,25 @@ static constexpr const char* CRAWLER_HTTP_VERSION_STR = "HTTP/1.1";
 // Global connection pool (singleton)
 static HttpConnectionPool* g_connection_pool = nullptr;
 
+// Global HTTP settings with mutex for thread safety
+static HttpSettings g_http_settings;
+static std::mutex g_http_settings_mutex;
+
 HttpConnectionPool& GetConnectionPool() {
 	if (!g_connection_pool) {
 		g_connection_pool = new HttpConnectionPool();
 	}
 	return *g_connection_pool;
+}
+
+void SetHttpSettings(const HttpSettings &settings) {
+	std::lock_guard<std::mutex> lock(g_http_settings_mutex);
+	g_http_settings = settings;
+}
+
+const HttpSettings& GetHttpSettings() {
+	std::lock_guard<std::mutex> lock(g_http_settings_mutex);
+	return g_http_settings;
 }
 
 void InitializeHttpClient() {
@@ -220,9 +234,26 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 		curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate");
 	}
 
-	// Set timeout (30 seconds)
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
-	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+	// Apply global HTTP settings (from DuckDB configuration)
+	const HttpSettings& settings = GetHttpSettings();
+
+	// Set timeout from settings
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(settings.timeout_seconds));
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, std::max(10L, static_cast<long>(settings.timeout_seconds / 3)));
+
+	// Keep-alive setting
+	curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, settings.keep_alive ? 1L : 0L);
+
+	// Proxy settings
+	if (!settings.proxy.empty()) {
+		curl_easy_setopt(curl, CURLOPT_PROXY, settings.proxy.c_str());
+		if (!settings.proxy_username.empty()) {
+			curl_easy_setopt(curl, CURLOPT_PROXYUSERNAME, settings.proxy_username.c_str());
+		}
+		if (!settings.proxy_password.empty()) {
+			curl_easy_setopt(curl, CURLOPT_PROXYPASSWORD, settings.proxy_password.c_str());
+		}
+	}
 
 	// Follow redirects
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);

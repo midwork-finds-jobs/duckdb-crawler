@@ -30,6 +30,15 @@ struct RetryConfig {
 	int max_backoff_ms = 30000;
 };
 
+// HTTP settings read from DuckDB configuration
+struct HttpSettings {
+	int timeout_seconds = 30;
+	bool keep_alive = true;
+	std::string proxy;
+	std::string proxy_username;
+	std::string proxy_password;
+};
+
 // Thread-safe connection pool for curl handles
 class HttpConnectionPool {
 public:
@@ -61,6 +70,10 @@ HttpConnectionPool& GetConnectionPool();
 void InitializeHttpClient();
 // Cleanup HTTP client (call in extension unload)
 void CleanupHttpClient();
+
+// Global HTTP settings (thread-safe)
+void SetHttpSettings(const HttpSettings &settings);
+const HttpSettings& GetHttpSettings();
 
 class HttpClient {
 public:

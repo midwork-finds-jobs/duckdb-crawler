@@ -52,6 +52,9 @@ struct CrawlParseData : public ParserExtensionParseData {
 	bool respect_nofollow = true;         // Skip rel="nofollow" links and nofollow meta
 	bool follow_canonical = true;         // Replace URL with canonical if different
 
+	// Multi-threading
+	int num_threads = 0;                  // 0 = auto (hardware_concurrency)
+
 	unique_ptr<ParserExtensionParseData> Copy() const override;
 	string ToString() const override;
 };
