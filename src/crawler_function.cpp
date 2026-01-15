@@ -25,6 +25,7 @@
 #include <ctime>
 #include <cmath>
 #include <future>
+#include <zlib.h>
 
 namespace duckdb {
 
@@ -88,6 +89,54 @@ static CrawlErrorType ClassifyError(int status_code, const std::string &error_ms
 		return CrawlErrorType::NETWORK_TIMEOUT;  // Default network error
 	}
 	return CrawlErrorType::NONE;
+}
+
+// Decompress gzip data (for .gz sitemap files)
+// Returns empty string on error
+static std::string DecompressGzip(const std::string &compressed_data) {
+	if (compressed_data.empty()) {
+		return "";
+	}
+
+	z_stream zs;
+	memset(&zs, 0, sizeof(zs));
+
+	// Use inflateInit2 with 16+MAX_WBITS to handle gzip format
+	if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) {
+		return "";
+	}
+
+	zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_data.data()));
+	zs.avail_in = static_cast<uInt>(compressed_data.size());
+
+	std::string decompressed;
+	char buffer[32768];
+
+	int ret;
+	do {
+		zs.next_out = reinterpret_cast<Bytef*>(buffer);
+		zs.avail_out = sizeof(buffer);
+
+		ret = inflate(&zs, Z_NO_FLUSH);
+
+		if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+			inflateEnd(&zs);
+			return "";
+		}
+
+		size_t have = sizeof(buffer) - zs.avail_out;
+		decompressed.append(buffer, have);
+	} while (ret != Z_STREAM_END);
+
+	inflateEnd(&zs);
+	return decompressed;
+}
+
+// Check if data starts with gzip magic bytes (0x1f 0x8b)
+static bool IsGzippedData(const std::string &data) {
+	return data.size() >= 2 &&
+	       static_cast<unsigned char>(data[0]) == 0x1f &&
+	       static_cast<unsigned char>(data[1]) == 0x8b;
 }
 
 // Global signal flag for graceful shutdown
@@ -1696,7 +1745,17 @@ static SitemapDiscoveryResult DiscoverSitemapUrlsThreadSafe(DatabaseInstance &db
 			continue;
 		}
 
-		auto sitemap_data = SitemapParser::Parse(response.body);
+		// Decompress gzipped sitemaps (check magic bytes, not URL extension)
+		// Note: DuckDB's http_get may auto-decompress, so we check actual data
+		std::string body = response.body;
+		if (IsGzippedData(body)) {
+			body = DecompressGzip(response.body);
+			if (body.empty()) {
+				continue;  // Decompression failed
+			}
+		}
+
+		auto sitemap_data = SitemapParser::Parse(body);
 
 		if (sitemap_data.is_index) {
 			for (auto &nested_url : sitemap_data.sitemap_urls) {
@@ -1821,7 +1880,16 @@ static std::vector<std::string> DiscoverSitemapUrls(ClientContext &context, Conn
 			continue;
 		}
 
-		auto sitemap_data = SitemapParser::Parse(response.body);
+		// Decompress gzipped sitemaps (check magic bytes, not URL extension)
+		std::string body = response.body;
+		if (IsGzippedData(body)) {
+			body = DecompressGzip(response.body);
+			if (body.empty()) {
+				continue;  // Decompression failed
+			}
+		}
+
+		auto sitemap_data = SitemapParser::Parse(body);
 
 		if (sitemap_data.is_index) {
 			// Sitemap index - add nested sitemaps to process
