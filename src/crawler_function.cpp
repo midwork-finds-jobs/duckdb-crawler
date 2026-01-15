@@ -1,4 +1,5 @@
 #include "crawler_function.hpp"
+#include "crawler_utils.hpp"
 #include "thread_utils.hpp"
 #include "robots_parser.hpp"
 #include "sitemap_parser.hpp"
@@ -31,67 +32,7 @@
 
 namespace duckdb {
 
-// Error classification for better analytics
-enum class CrawlErrorType : uint8_t {
-	NONE = 0,
-	NETWORK_TIMEOUT = 1,
-	NETWORK_DNS_FAILURE = 2,
-	NETWORK_CONNECTION_REFUSED = 3,
-	NETWORK_SSL_ERROR = 4,
-	HTTP_CLIENT_ERROR = 5,
-	HTTP_SERVER_ERROR = 6,
-	HTTP_RATE_LIMITED = 7,
-	ROBOTS_DISALLOWED = 8,
-	CONTENT_TOO_LARGE = 9,
-	CONTENT_TYPE_REJECTED = 10,
-	MAX_RETRIES_EXCEEDED = 11
-};
-
-static const char* ErrorTypeToString(CrawlErrorType type) {
-	switch (type) {
-		case CrawlErrorType::NONE: return "";
-		case CrawlErrorType::NETWORK_TIMEOUT: return "network_timeout";
-		case CrawlErrorType::NETWORK_DNS_FAILURE: return "network_dns_failure";
-		case CrawlErrorType::NETWORK_CONNECTION_REFUSED: return "network_connection_refused";
-		case CrawlErrorType::NETWORK_SSL_ERROR: return "network_ssl_error";
-		case CrawlErrorType::HTTP_CLIENT_ERROR: return "http_client_error";
-		case CrawlErrorType::HTTP_SERVER_ERROR: return "http_server_error";
-		case CrawlErrorType::HTTP_RATE_LIMITED: return "http_rate_limited";
-		case CrawlErrorType::ROBOTS_DISALLOWED: return "robots_disallowed";
-		case CrawlErrorType::CONTENT_TOO_LARGE: return "content_too_large";
-		case CrawlErrorType::CONTENT_TYPE_REJECTED: return "content_type_rejected";
-		case CrawlErrorType::MAX_RETRIES_EXCEEDED: return "max_retries_exceeded";
-		default: return "unknown";
-	}
-}
-
-// Classify error from HTTP response
-static CrawlErrorType ClassifyError(int status_code, const std::string &error_msg) {
-	if (status_code == 429) return CrawlErrorType::HTTP_RATE_LIMITED;
-	if (status_code >= 500 && status_code < 600) return CrawlErrorType::HTTP_SERVER_ERROR;
-	if (status_code >= 400 && status_code < 500) return CrawlErrorType::HTTP_CLIENT_ERROR;
-	if (status_code <= 0) {
-		// Network error - try to classify from message
-		if (error_msg.find("timeout") != std::string::npos ||
-		    error_msg.find("Timeout") != std::string::npos) {
-			return CrawlErrorType::NETWORK_TIMEOUT;
-		}
-		if (error_msg.find("DNS") != std::string::npos ||
-		    error_msg.find("resolve") != std::string::npos) {
-			return CrawlErrorType::NETWORK_DNS_FAILURE;
-		}
-		if (error_msg.find("SSL") != std::string::npos ||
-		    error_msg.find("certificate") != std::string::npos) {
-			return CrawlErrorType::NETWORK_SSL_ERROR;
-		}
-		if (error_msg.find("refused") != std::string::npos ||
-		    error_msg.find("connect") != std::string::npos) {
-			return CrawlErrorType::NETWORK_CONNECTION_REFUSED;
-		}
-		return CrawlErrorType::NETWORK_TIMEOUT;  // Default network error
-	}
-	return CrawlErrorType::NONE;
-}
+// CrawlErrorType, ErrorTypeToString, ClassifyError defined in crawler_utils.hpp
 
 // Load HTTP settings from DuckDB configuration
 static void LoadHttpSettingsFromDuckDB(Connection &conn) {
@@ -139,53 +80,7 @@ static void LoadHttpSettingsFromDuckDB(Connection &conn) {
 	SetHttpSettings(settings);
 }
 
-// Decompress gzip data (for .gz sitemap files)
-// Returns empty string on error
-static std::string DecompressGzip(const std::string &compressed_data) {
-	if (compressed_data.empty()) {
-		return "";
-	}
-
-	z_stream zs;
-	memset(&zs, 0, sizeof(zs));
-
-	// Use inflateInit2 with 16+MAX_WBITS to handle gzip format
-	if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) {
-		return "";
-	}
-
-	zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_data.data()));
-	zs.avail_in = static_cast<uInt>(compressed_data.size());
-
-	std::string decompressed;
-	char buffer[32768];
-
-	int ret;
-	do {
-		zs.next_out = reinterpret_cast<Bytef*>(buffer);
-		zs.avail_out = sizeof(buffer);
-
-		ret = inflate(&zs, Z_NO_FLUSH);
-
-		if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
-			inflateEnd(&zs);
-			return "";
-		}
-
-		size_t have = sizeof(buffer) - zs.avail_out;
-		decompressed.append(buffer, have);
-	} while (ret != Z_STREAM_END);
-
-	inflateEnd(&zs);
-	return decompressed;
-}
-
-// Check if data starts with gzip magic bytes (0x1f 0x8b)
-static bool IsGzippedData(const std::string &data) {
-	return data.size() >= 2 &&
-	       static_cast<unsigned char>(data[0]) == 0x1f &&
-	       static_cast<unsigned char>(data[1]) == 0x8b;
-}
+// DecompressGzip, IsGzippedData defined in crawler_utils.hpp
 
 // Global signal flag for graceful shutdown
 static std::atomic<bool> g_shutdown_requested(false);
@@ -251,18 +146,7 @@ static void SignalHandler(int signum) {
 // DomainState, UrlQueueEntry, ThreadSafeUrlQueue, ThreadSafeDomainMap
 // are defined in thread_utils.hpp
 
-// Fibonacci backoff: 3, 3, 6, 9, 15, 24, 39, 63, 102, 165, 267...
-static int FibonacciBackoffSeconds(int n, int max_seconds) {
-	if (n <= 1) return 3;
-	int a = 3, b = 3;
-	for (int i = 2; i <= n; i++) {
-		int temp = a + b;
-		a = b;
-		b = temp;
-		if (b > max_seconds) return max_seconds;
-	}
-	return std::min(b, max_seconds);
-}
+// FibonacciBackoffSeconds defined in crawler_utils.hpp
 
 // Adaptive rate limiting: adjust delay based on response times
 // Uses exponential moving average (EMA) with alpha=0.2
@@ -291,74 +175,7 @@ static void UpdateAdaptiveDelay(DomainState &state, double response_ms, double m
 	}
 }
 
-// Parse HTTP date format: "Tue, 14 Jan 2025 12:00:00 GMT"
-// Returns empty string if parsing fails
-static std::string ParseAndValidateServerDate(const std::string &server_date) {
-	if (server_date.empty()) {
-		return "";
-	}
-
-	// Get current time
-	auto now = std::chrono::system_clock::now();
-	auto now_time_t = std::chrono::system_clock::to_time_t(now);
-
-	// Parse HTTP date - format: "Day, DD Mon YYYY HH:MM:SS GMT"
-	struct tm tm_parsed = {};
-	const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-	                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-
-	// Find components manually since strptime may not be available
-	// Expected format: "Tue, 14 Jan 2025 12:00:00 GMT"
-	int day, year, hour, min, sec;
-	char month_str[4] = {0};
-
-	int parsed = sscanf(server_date.c_str(), "%*[^,], %d %3s %d %d:%d:%d",
-	                    &day, month_str, &year, &hour, &min, &sec);
-
-	if (parsed != 6) {
-		return "";  // Failed to parse
-	}
-
-	// Convert month string to number
-	int month = -1;
-	for (int i = 0; i < 12; i++) {
-		if (strncmp(month_str, months[i], 3) == 0) {
-			month = i;
-			break;
-		}
-	}
-
-	if (month < 0) {
-		return "";  // Invalid month
-	}
-
-	// Build tm struct
-	tm_parsed.tm_year = year - 1900;
-	tm_parsed.tm_mon = month;
-	tm_parsed.tm_mday = day;
-	tm_parsed.tm_hour = hour;
-	tm_parsed.tm_min = min;
-	tm_parsed.tm_sec = sec;
-
-	// Convert to time_t (assuming GMT)
-	time_t server_time = timegm(&tm_parsed);
-	if (server_time == -1) {
-		return "";
-	}
-
-	// Check if server time is within 15 minutes of local time
-	double diff_seconds = difftime(server_time, now_time_t);
-	if (std::abs(diff_seconds) > 15 * 60) {
-		// Server clock is off by more than 15 minutes - don't trust it
-		return "";
-	}
-
-	// Server time is trustworthy - format as ISO timestamp for DuckDB
-	char buf[32];
-	struct tm *gmt = gmtime(&server_time);
-	strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", gmt);
-	return std::string(buf);
-}
+// ParseAndValidateServerDate defined in crawler_utils.hpp
 
 // Crawl result for a single URL
 struct CrawlResult {
@@ -371,237 +188,9 @@ struct CrawlResult {
 	std::chrono::system_clock::time_point crawled_at;
 };
 
-// Extract domain from URL
-static std::string ExtractDomain(const std::string &url) {
-	// Simple domain extraction: find :// then extract until next /
-	size_t proto_end = url.find("://");
-	if (proto_end == std::string::npos) {
-		return "";
-	}
-	size_t domain_start = proto_end + 3;
-	size_t domain_end = url.find('/', domain_start);
-	if (domain_end == std::string::npos) {
-		domain_end = url.length();
-	}
-	std::string domain = url.substr(domain_start, domain_end - domain_start);
-
-	// Remove port if present
-	size_t port_pos = domain.find(':');
-	if (port_pos != std::string::npos) {
-		domain = domain.substr(0, port_pos);
-	}
-
-	return domain;
-}
-
-// Extract path from URL
-static std::string ExtractPath(const std::string &url) {
-	size_t proto_end = url.find("://");
-	if (proto_end == std::string::npos) {
-		return "/";
-	}
-	size_t path_start = url.find('/', proto_end + 3);
-	if (path_start == std::string::npos) {
-		return "/";
-	}
-	return url.substr(path_start);
-}
-
-// Generate SURT key (Sort-friendly URI Reordering Transform) like Common Crawl
-// Example: https://www.example.com/path?q=1 → com,example)/path?q=1
-// Note: 'www' prefix is stripped per SURT convention
-static std::string GenerateSurtKey(const std::string &url) {
-	// Extract domain
-	size_t proto_end = url.find("://");
-	if (proto_end == std::string::npos) {
-		return url;  // Invalid URL, return as-is
-	}
-	size_t domain_start = proto_end + 3;
-	size_t domain_end = url.find('/', domain_start);
-	if (domain_end == std::string::npos) {
-		domain_end = url.length();
-	}
-
-	std::string domain = url.substr(domain_start, domain_end - domain_start);
-
-	// Remove port if present
-	size_t port_pos = domain.find(':');
-	if (port_pos != std::string::npos) {
-		domain = domain.substr(0, port_pos);
-	}
-
-	// Convert domain to lowercase
-	std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
-
-	// Strip 'www.' prefix per SURT convention
-	if (domain.substr(0, 4) == "www.") {
-		domain = domain.substr(4);
-	}
-
-	// Split domain by '.' and reverse
-	std::vector<std::string> parts;
-	size_t pos = 0;
-	size_t prev = 0;
-	while ((pos = domain.find('.', prev)) != std::string::npos) {
-		parts.push_back(domain.substr(prev, pos - prev));
-		prev = pos + 1;
-	}
-	parts.push_back(domain.substr(prev));
-
-	// Build reversed domain with commas
-	std::string surt;
-	for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-		if (!surt.empty()) {
-			surt += ",";
-		}
-		surt += *it;
-	}
-
-	// Add path (everything after domain)
-	surt += ")";
-	if (domain_end < url.length()) {
-		surt += url.substr(domain_end);
-	} else {
-		surt += "/";
-	}
-
-	return surt;
-}
-
-// Generate domain SURT prefix for fast lookups (without trailing path)
-// Example: "www.example.com" → "com,example)"
-// Example: "example.com" → "com,example)"
-static std::string GenerateDomainSurt(const std::string &hostname) {
-	if (hostname.empty()) {
-		return "";
-	}
-
-	// Convert to lowercase
-	std::string domain = hostname;
-	std::transform(domain.begin(), domain.end(), domain.begin(), ::tolower);
-
-	// Remove port if present
-	size_t port_pos = domain.find(':');
-	if (port_pos != std::string::npos) {
-		domain = domain.substr(0, port_pos);
-	}
-
-	// Strip 'www.' prefix per SURT convention
-	if (domain.substr(0, 4) == "www.") {
-		domain = domain.substr(4);
-	}
-
-	// Split domain by '.' and reverse
-	std::vector<std::string> parts;
-	size_t pos = 0;
-	size_t prev = 0;
-	while ((pos = domain.find('.', prev)) != std::string::npos) {
-		parts.push_back(domain.substr(prev, pos - prev));
-		prev = pos + 1;
-	}
-	parts.push_back(domain.substr(prev));
-
-	// Build reversed domain with commas
-	std::string surt;
-	for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-		if (!surt.empty()) {
-			surt += ",";
-		}
-		surt += *it;
-	}
-	surt += ")";
-
-	return surt;
-}
-
-// Generate content hash for deduplication (uses std::hash, returns hex string)
-static std::string GenerateContentHash(const std::string &content) {
-	if (content.empty()) {
-		return "";
-	}
-	std::hash<std::string> hasher;
-	size_t hash_value = hasher(content);
-	// Convert to hex string (16 chars for 64-bit hash)
-	char buf[17];
-	snprintf(buf, sizeof(buf), "%016zx", hash_value);
-	return std::string(buf);
-}
-
-// Check if content-type matches a pattern (supports wildcards like "text/*")
-static bool ContentTypeMatches(const std::string &content_type, const std::string &pattern) {
-	if (pattern.empty()) {
-		return false;
-	}
-	// Extract main type from content_type (e.g., "text/html; charset=utf-8" -> "text/html")
-	std::string ct = content_type;
-	size_t semicolon = ct.find(';');
-	if (semicolon != std::string::npos) {
-		ct = ct.substr(0, semicolon);
-	}
-	// Trim whitespace
-	while (!ct.empty() && std::isspace(ct.back())) ct.pop_back();
-	while (!ct.empty() && std::isspace(ct.front())) ct.erase(ct.begin());
-
-	// Convert both to lowercase for comparison
-	std::string ct_lower = ct;
-	std::string pat_lower = pattern;
-	std::transform(ct_lower.begin(), ct_lower.end(), ct_lower.begin(), ::tolower);
-	std::transform(pat_lower.begin(), pat_lower.end(), pat_lower.begin(), ::tolower);
-
-	// Check for wildcard (e.g., "text/*")
-	if (pat_lower.length() >= 2 && pat_lower.substr(pat_lower.length() - 2) == "/*") {
-		std::string prefix = pat_lower.substr(0, pat_lower.length() - 1);  // "text/"
-		return ct_lower.find(prefix) == 0;
-	}
-
-	// Exact match
-	return ct_lower == pat_lower;
-}
-
-// Check if content-type is acceptable (matches accept list, doesn't match reject list)
-static bool IsContentTypeAcceptable(const std::string &content_type,
-                                     const std::string &accept_types,
-                                     const std::string &reject_types) {
-	// If no filters, accept all
-	if (accept_types.empty() && reject_types.empty()) {
-		return true;
-	}
-
-	// Check accept list first (if specified)
-	if (!accept_types.empty()) {
-		bool accepted = false;
-		std::istringstream accept_stream(accept_types);
-		std::string pattern;
-		while (std::getline(accept_stream, pattern, ',')) {
-			// Trim whitespace
-			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
-			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
-			if (ContentTypeMatches(content_type, pattern)) {
-				accepted = true;
-				break;
-			}
-		}
-		if (!accepted) {
-			return false;
-		}
-	}
-
-	// Check reject list (if specified)
-	if (!reject_types.empty()) {
-		std::istringstream reject_stream(reject_types);
-		std::string pattern;
-		while (std::getline(reject_stream, pattern, ',')) {
-			// Trim whitespace
-			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
-			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
-			if (ContentTypeMatches(content_type, pattern)) {
-				return false;  // Rejected
-			}
-		}
-	}
-
-	return true;
-}
+// URL utilities (ExtractDomain, ExtractPath, GenerateSurtKey, GenerateDomainSurt,
+// GenerateContentHash) and content-type utilities (ContentTypeMatches, IsContentTypeAcceptable)
+// are defined in crawler_utils.hpp
 
 // Bind data for the crawler function
 struct CrawlerBindData : public TableFunctionData {

@@ -38,6 +38,7 @@ include_directories(src/include)
 set(EXTENSION_SOURCES
     src/crawler_extension.cpp
     src/crawler_function.cpp
+    src/crawler_utils.cpp
     src/thread_utils.cpp
     src/robots_parser.cpp
     src/http_client.cpp
