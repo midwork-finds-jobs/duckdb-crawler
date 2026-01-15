@@ -31,9 +31,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Initialize HTTP client (libcurl with connection pooling)
 	InitializeHttpClient();
 
-	// Register crawl_urls() table function
-	RegisterCrawlerFunction(loader);
-
 	// Register crawl_into_internal() table function for CRAWL INTO syntax
 	RegisterCrawlIntoFunction(loader);
 

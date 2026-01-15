@@ -7,8 +7,7 @@ namespace duckdb {
 
 // Statement types for CRAWL parser
 enum class CrawlStatementType : uint8_t {
-	CRAWL,      // CRAWL (...) INTO table
-	STOP_CRAWL  // STOP CRAWL INTO table - stop a running crawl
+	CRAWL      // CRAWL (...) INTO table
 };
 
 // Parsed data from CRAWL statement

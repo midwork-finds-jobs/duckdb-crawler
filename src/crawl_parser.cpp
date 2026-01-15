@@ -44,9 +44,6 @@ unique_ptr<ParserExtensionParseData> CrawlParseData::Copy() const {
 }
 
 string CrawlParseData::ToString() const {
-	if (statement_type == CrawlStatementType::STOP_CRAWL) {
-		return "STOP CRAWL INTO " + target_table;
-	}
 	return "CRAWL (" + source_query + ") INTO " + target_table;
 }
 
@@ -219,36 +216,9 @@ CrawlParserExtension::CrawlParserExtension() {
 }
 
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
-	// Check if query starts with CRAWL or STOP (case-insensitive)
+	// Check if query starts with CRAWL (case-insensitive)
 	string trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
-
-	// Handle STOP CRAWL INTO table_name
-	if (StringUtil::StartsWith(lower, "stop crawl")) {
-		auto data = make_uniq<CrawlParseData>();
-		data->statement_type = CrawlStatementType::STOP_CRAWL;
-
-		// Find INTO keyword
-		size_t into_pos = lower.find("into");
-		if (into_pos == string::npos) {
-			return ParserExtensionParseResult("STOP CRAWL syntax error: expected INTO table_name");
-		}
-
-		// Extract table name
-		string after_into = Trim(trimmed.substr(into_pos + 4));
-		// Remove trailing semicolon if present
-		if (!after_into.empty() && after_into.back() == ';') {
-			after_into.pop_back();
-			after_into = Trim(after_into);
-		}
-
-		if (after_into.empty()) {
-			return ParserExtensionParseResult("STOP CRAWL syntax error: table name is required");
-		}
-
-		data->target_table = after_into;
-		return ParserExtensionParseResult(std::move(data));
-	}
 
 	if (!StringUtil::StartsWith(lower, "crawl")) {
 		// Not a CRAWL statement, let default parser handle it
@@ -375,23 +345,6 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 	auto &data = (CrawlParseData &)*parse_data;
 	auto &catalog = Catalog::GetSystemCatalog(context);
 	ParserExtensionPlanResult result;
-
-	// Handle STOP CRAWL separately
-	if (data.statement_type == CrawlStatementType::STOP_CRAWL) {
-		auto catalog_entry = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, DEFAULT_SCHEMA,
-		                                       "stop_crawl_internal", OnEntryNotFound::THROW_EXCEPTION);
-		auto &table_function_catalog_entry = catalog_entry->Cast<TableFunctionCatalogEntry>();
-
-		if (table_function_catalog_entry.functions.functions.empty()) {
-			throw BinderException("STOP CRAWL: stop_crawl_internal function not found");
-		}
-
-		result.function = table_function_catalog_entry.functions.functions[0];
-		result.parameters.push_back(Value(data.target_table));
-		result.requires_valid_transaction = true;
-		result.return_type = StatementReturnType::CHANGED_ROWS;
-		return result;
-	}
 
 	// Look up the registered crawl_into_internal function from the catalog
 	auto catalog_entry = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, DEFAULT_SCHEMA,
