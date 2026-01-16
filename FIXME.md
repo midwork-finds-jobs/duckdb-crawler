@@ -42,10 +42,18 @@ var data = {"active": true};
 
 **Status:** Fixed. Comments are stripped before parsing.
 
-### 4. Calculated/dynamic values (impossible without execution)
+### 4. ~~JSON.parse with string literals~~ FIXED
 
 ```javascript
-var config = JSON.parse('{"a":1}');      // Can't get the object
+var data = JSON.parse('[{\x22name\x22:\x22test\x22}]');  // Hex escapes - works!
+var data = JSON.parse('{"greeting":"\u0048ello"}');      // Unicode escapes - works!
+```
+
+**Status:** Fixed. `JSON.parse('...')` and `JSON.parse("...")` are decoded (hex `\xNN`, unicode `\uNNNN`, and standard escapes).
+
+### 5. Other calculated/dynamic values (impossible without execution)
+
+```javascript
 var data = Object.assign({}, defaults);  // Can't resolve
 var merged = {...base, ...extra};        // Spread operator
 const x = require('./config.json');      // Module import
@@ -53,7 +61,7 @@ const x = require('./config.json');      // Module import
 
 **Workaround:** None without JavaScript execution (would need QuickJS/Boa).
 
-### 5. Destructuring assignments (false positives)
+### 6. Destructuring assignments (false positives)
 
 ```javascript
 const {name, value} = someObject;  // Not a JSON assignment, but looks like one
@@ -61,7 +69,7 @@ const {name, value} = someObject;  // Not a JSON assignment, but looks like one
 
 **Status:** Usually rejected by yyjson validation since `{name, value}` isn't valid JSON.
 
-### 6. Multi-declaration statements
+### 7. Multi-declaration statements
 
 ```javascript
 var a = 1, b = {"key": "value"}, c = 3;  // Only first value checked
@@ -69,7 +77,7 @@ var a = 1, b = {"key": "value"}, c = 3;  // Only first value checked
 
 **Workaround:** None. Parser only looks at first assignment.
 
-### 7. Non-standard JS (minified edge cases)
+### 8. Non-standard JS (minified edge cases)
 
 ```javascript
 var a={"x":1},b={"y":2}  // No spaces, multiple vars

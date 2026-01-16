@@ -685,49 +685,44 @@ static bool IsSitemapUrl(const std::string &url) {
 	return false;
 }
 
-// Helper: Check if a string looks like a valid URL or hostname
+// Helper: Check if a string looks like a valid URL or hostname using curl's URL parser
 // Valid formats: "example.com", "example.com/path", "https://example.com", "http://example.com/path"
+// Also supports: "localhost", "localhost:8080/path", "http://localhost:8080/path"
 static bool IsValidUrlOrHostname(const std::string &input) {
 	if (input.empty()) return false;
 
-	// Must contain at least one dot (domain)
-	if (input.find('.') == std::string::npos) return false;
+	// Build URL string for curl to parse
+	std::string url_to_parse = input;
 
-	// Check for full URL with protocol
-	if (input.find("://") != std::string::npos) {
+	// If no protocol, prepend https:// so curl can parse it
+	if (input.find("://") == std::string::npos) {
+		url_to_parse = "https://" + input;
+	} else {
 		// Must start with http:// or https://
 		if (input.substr(0, 7) != "http://" && input.substr(0, 8) != "https://") {
 			return false;
 		}
-		// Must have something after protocol
-		size_t start = input.find("://") + 3;
-		if (start >= input.length()) return false;
-		// Check domain part has a dot
-		std::string rest = input.substr(start);
-		size_t slash = rest.find('/');
-		std::string domain = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
-		if (domain.find('.') == std::string::npos) return false;
-		return true;
 	}
 
-	// Hostname or hostname/path format
-	// Extract hostname part (before first slash)
-	size_t slash_pos = input.find('/');
-	std::string hostname = (slash_pos != std::string::npos) ? input.substr(0, slash_pos) : input;
+	// Use curl's URL parser
+	CURLU *url_handle = curl_url();
+	if (!url_handle) return false;
 
-	// Hostname must have a dot
-	if (hostname.find('.') == std::string::npos) return false;
-
-	// Basic hostname validation: alphanumeric, dots, and hyphens
-	for (char c : hostname) {
-		if (!std::isalnum(c) && c != '.' && c != '-') return false;
+	CURLUcode result = curl_url_set(url_handle, CURLUPART_URL, url_to_parse.c_str(), 0);
+	if (result != CURLUE_OK) {
+		curl_url_cleanup(url_handle);
+		return false;
 	}
 
-	// Can't start or end with dot or hyphen
-	if (hostname.front() == '.' || hostname.front() == '-') return false;
-	if (hostname.back() == '.' || hostname.back() == '-') return false;
+	// Get host to verify it exists
+	char *host = nullptr;
+	result = curl_url_get(url_handle, CURLUPART_HOST, &host, 0);
+	bool valid = (result == CURLUE_OK && host != nullptr && strlen(host) > 0);
 
-	return true;
+	if (host) curl_free(host);
+	curl_url_cleanup(url_handle);
+
+	return valid;
 }
 
 // Helper: Parse site input - handles various formats:

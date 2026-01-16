@@ -95,6 +95,112 @@ static std::string StripComments(const std::string &script) {
 	return result;
 }
 
+// Decode JavaScript escape sequences: \xNN (hex) and \uNNNN (unicode)
+static std::string DecodeJsEscapes(const std::string &s) {
+	std::string result;
+	result.reserve(s.size());
+
+	for (size_t i = 0; i < s.size(); i++) {
+		if (s[i] == '\\' && i + 1 < s.size()) {
+			char next = s[i + 1];
+			if (next == 'x' && i + 3 < s.size()) {
+				// \xNN hex escape
+				std::string hex = s.substr(i + 2, 2);
+				try {
+					char decoded = static_cast<char>(std::stoi(hex, nullptr, 16));
+					result += decoded;
+					i += 3;
+					continue;
+				} catch (...) {}
+			} else if (next == 'u' && i + 5 < s.size()) {
+				// \uNNNN unicode escape
+				std::string hex = s.substr(i + 2, 4);
+				try {
+					int codepoint = std::stoi(hex, nullptr, 16);
+					// Simple UTF-8 encoding for BMP characters
+					if (codepoint < 0x80) {
+						result += static_cast<char>(codepoint);
+					} else if (codepoint < 0x800) {
+						result += static_cast<char>(0xC0 | (codepoint >> 6));
+						result += static_cast<char>(0x80 | (codepoint & 0x3F));
+					} else {
+						result += static_cast<char>(0xE0 | (codepoint >> 12));
+						result += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+						result += static_cast<char>(0x80 | (codepoint & 0x3F));
+					}
+					i += 5;
+					continue;
+				} catch (...) {}
+			} else if (next == 'n') {
+				result += '\n'; i++; continue;
+			} else if (next == 'r') {
+				result += '\r'; i++; continue;
+			} else if (next == 't') {
+				result += '\t'; i++; continue;
+			} else if (next == '\\') {
+				result += '\\'; i++; continue;
+			} else if (next == '"') {
+				result += '"'; i++; continue;
+			} else if (next == '\'') {
+				result += '\''; i++; continue;
+			} else if (next == '/') {
+				result += '/'; i++; continue;
+			}
+		}
+		result += s[i];
+	}
+	return result;
+}
+
+// Extract JSON from JSON.parse('...') or JSON.parse("...")
+// Returns decoded JSON string or empty if not found/invalid
+static std::string ExtractJsonParse(const std::string &content, size_t start_pos) {
+	// Check for JSON.parse(
+	if (start_pos + 11 > content.size()) return "";
+	if (content.substr(start_pos, 11) != "JSON.parse(") return "";
+
+	size_t pos = start_pos + 11;
+
+	// Skip whitespace
+	while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos]))) {
+		pos++;
+	}
+
+	if (pos >= content.size()) return "";
+
+	// Must be string literal
+	char quote = content[pos];
+	if (quote != '"' && quote != '\'') return "";
+
+	pos++; // Skip opening quote
+	size_t str_start = pos;
+
+	// Find end of string, handling escapes
+	while (pos < content.size()) {
+		if (content[pos] == '\\' && pos + 1 < content.size()) {
+			pos += 2; // Skip escape sequence
+			continue;
+		}
+		if (content[pos] == quote) {
+			break;
+		}
+		pos++;
+	}
+
+	if (pos >= content.size()) return "";
+
+	std::string encoded = content.substr(str_start, pos - str_start);
+	std::string decoded = DecodeJsEscapes(encoded);
+
+	// Validate with yyjson
+	yyjson_doc *doc = TryParseJson(decoded);
+	if (doc) {
+		yyjson_doc_free(doc);
+		return decoded;
+	}
+	return "";
+}
+
 // Extract JSON object/array starting from position
 // Returns empty string if not valid JSON
 static std::string ExtractJsonValue(const std::string &content, size_t start_pos) {
@@ -111,6 +217,14 @@ static std::string ExtractJsonValue(const std::string &content, size_t start_pos
 
 	if (start_pos >= content.size()) {
 		return "";
+	}
+
+	// Check for JSON.parse() pattern first
+	if (start_pos + 11 <= content.size() && content.substr(start_pos, 11) == "JSON.parse(") {
+		std::string parsed = ExtractJsonParse(content, start_pos);
+		if (!parsed.empty()) {
+			return parsed;
+		}
 	}
 
 	char first_char = content[start_pos];
