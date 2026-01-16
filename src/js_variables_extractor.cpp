@@ -145,6 +145,9 @@ static std::string DecodeJsEscapes(const std::string &s) {
 				result += '\''; i++; continue;
 			} else if (next == '/') {
 				result += '/'; i++; continue;
+			} else {
+				// Unknown escape - just output the character (JS treats \X as X for non-special chars)
+				result += next; i++; continue;
 			}
 		}
 		result += s[i];
