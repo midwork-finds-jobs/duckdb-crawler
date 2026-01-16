@@ -21,8 +21,7 @@ WITH jobs_json AS (
         crawled_at,
         json(js::JSON->>'jobs') as jobs_array
     FROM zoho_raw
-    WHERE js IS NOT NULL
-      AND js != ''
+    WHERE js IS NOT NULL  -- empty results stored as NULL, not ''
       AND json_valid(js::JSON->>'jobs')
 )
 SELECT
