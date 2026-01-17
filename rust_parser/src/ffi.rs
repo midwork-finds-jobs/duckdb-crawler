@@ -3,7 +3,23 @@
 use crate::extractors::{extract_all, ExtractionRequest};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+// Global interrupt flag for graceful shutdown
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Set the interrupt flag (called from C++ signal handler)
+#[no_mangle]
+pub extern "C" fn set_interrupted(value: bool) {
+    INTERRUPTED.store(value, Ordering::SeqCst);
+}
+
+/// Check if interrupted
+#[no_mangle]
+pub extern "C" fn is_interrupted() -> bool {
+    INTERRUPTED.load(Ordering::SeqCst)
+}
 
 /// FFI-safe extraction result
 #[repr(C)]
@@ -208,16 +224,34 @@ pub unsafe extern "C" fn extract_opengraph_ffi(
     }
 }
 
-/// Extract JS variables from HTML (placeholder - needs tree-sitter)
+/// Extract JS variables from HTML using SWC parser
 #[no_mangle]
 pub unsafe extern "C" fn extract_js_ffi(
-    _html_ptr: *const c_char,
-    _html_len: usize,
+    html_ptr: *const c_char,
+    html_len: usize,
 ) -> ExtractionResultFFI {
-    // TODO: Implement JS extraction with tree-sitter
-    ExtractionResultFFI {
-        json_ptr: string_to_ptr("{}".to_string()),
-        error_ptr: ptr::null_mut(),
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let document = scraper::Html::parse_document(html);
+    let js_vars = crate::extractors::extract_js_variables(&document);
+
+    match serde_json::to_string(&js_vars) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
     }
 }
 
@@ -276,6 +310,107 @@ pub unsafe extern "C" fn extract_css_ffi(
     }
 }
 
+/// Extract links from HTML using a CSS selector
+/// Returns JSON array of absolute URLs
+#[no_mangle]
+pub unsafe extern "C" fn extract_links_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+    selector_ptr: *const c_char,
+    base_url_ptr: *const c_char,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let selector = match CStr::from_ptr(selector_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid selector: {}", e)),
+            };
+        }
+    };
+
+    let base_url = match CStr::from_ptr(base_url_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid base URL: {}", e)),
+            };
+        }
+    };
+
+    let links = crate::extractors::extract_links(html, selector, base_url);
+
+    match serde_json::to_string(&links) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
+    }
+}
+
+/// Extract element as struct with text, html, and attr map
+/// Returns JSON: {"text": "...", "html": "...", "attr": {"key": "value", ...}}
+#[no_mangle]
+pub unsafe extern "C" fn extract_element_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+    selector_ptr: *const c_char,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let selector = match CStr::from_ptr(selector_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid selector: {}", e)),
+            };
+        }
+    };
+
+    match crate::extractors::extract_element(html, selector) {
+        Some(element_data) => {
+            match serde_json::to_string(&element_data) {
+                Ok(json) => ExtractionResultFFI {
+                    json_ptr: string_to_ptr(json),
+                    error_ptr: ptr::null_mut(),
+                },
+                Err(e) => ExtractionResultFFI {
+                    json_ptr: ptr::null_mut(),
+                    error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+                },
+            }
+        }
+        None => ExtractionResultFFI {
+            json_ptr: string_to_ptr("null".to_string()),
+            error_ptr: ptr::null_mut(),
+        },
+    }
+}
+
 // ============================================================================
 // Batch Crawl + Extract (HTTP in Rust)
 // ============================================================================
@@ -298,6 +433,8 @@ struct BatchCrawlRequest {
     concurrency: usize,
     #[serde(default)]
     delay_ms: u64, // Min delay between requests to same domain
+    #[serde(default)]
+    respect_robots: bool, // Check robots.txt before fetching
 }
 
 fn default_user_agent() -> String {
@@ -497,18 +634,48 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         let concurrency = request.concurrency.max(1).min(32);
         let extraction = request.extraction.clone();
         let delay_ms = request.delay_ms;
+        let respect_robots = request.respect_robots;
+        let user_agent = request.user_agent.clone();
         let rate_limiter: DomainRateLimiter = Arc::new(Mutex::new(HashMap::new()));
 
-        stream::iter(request.urls)
+        // Filter URLs by robots.txt if enabled
+        let urls: Vec<String> = if respect_robots {
+            let robots_cache = crate::robots::RobotsCache::new();
+            let config = ureq::Agent::config_builder()
+                .timeout_global(Some(Duration::from_secs(10)))
+                .build();
+            let blocking_agent = ureq::Agent::new_with_config(config);
+
+            request.urls
+                .into_iter()
+                .filter(|url| {
+                    let check = robots_cache.check_blocking(&blocking_agent, url, &user_agent);
+                    check.allowed
+                })
+                .collect()
+        } else {
+            request.urls
+        };
+
+        // Process URLs with interrupt checking
+        let mut results = Vec::new();
+        let mut url_stream = stream::iter(urls)
             .map(|url| {
                 let client = client.clone();
                 let extraction = extraction.clone();
                 let rate_limiter = rate_limiter.clone();
                 async move { fetch_and_extract(&client, url, &extraction, &rate_limiter, delay_ms).await }
             })
-            .buffer_unordered(concurrency)
-            .collect::<Vec<_>>()
-            .await
+            .buffer_unordered(concurrency);
+
+        while let Some(result) = url_stream.next().await {
+            results.push(result);
+            // Check for interrupt after each result
+            if INTERRUPTED.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        results
     });
 
     let response = BatchCrawlResponse { results };

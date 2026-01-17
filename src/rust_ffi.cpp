@@ -32,6 +32,15 @@ extern "C" {
     ExtractionResultFFI check_robots_ffi(const char *request_json);
     void free_extraction_result(ExtractionResultFFI result);
     const char *rust_parser_version();
+    // Signal handling for graceful shutdown
+    void set_interrupted(bool value);
+    bool is_interrupted();
+    // Link extraction
+    ExtractionResultFFI extract_links_ffi(const char *html_ptr, size_t html_len,
+                                           const char *selector, const char *base_url);
+    // Element extraction (returns text, html, and all attributes)
+    ExtractionResultFFI extract_element_ffi(const char *html_ptr, size_t html_len,
+                                             const char *selector);
 }
 
 namespace duckdb {
@@ -543,6 +552,62 @@ std::string CheckRobotsWithRust(const std::string &request_json) {
     return result.GetJson();
 }
 
+void SetInterrupted(bool value) {
+    set_interrupted(value);
+}
+
+bool IsInterrupted() {
+    return is_interrupted();
+}
+
+std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std::string &selector,
+                                               const std::string &base_url) {
+    std::vector<std::string> result;
+    if (html.empty()) return result;
+
+    auto ffi_result = extract_links_ffi(html.c_str(), html.length(),
+                                         selector.c_str(), base_url.c_str());
+    RustResult rust_result(ffi_result);
+
+    if (rust_result.HasError()) {
+        return result;
+    }
+
+    std::string json = rust_result.GetJson();
+    if (json.empty()) return result;
+
+    // Parse JSON array of URLs
+    yyjson_doc *doc = yyjson_read(json.c_str(), json.length(), 0);
+    if (!doc) return result;
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    if (yyjson_is_arr(root)) {
+        size_t idx, max_idx;
+        yyjson_val *val;
+        yyjson_arr_foreach(root, idx, max_idx, val) {
+            if (yyjson_is_str(val)) {
+                result.push_back(yyjson_get_str(val));
+            }
+        }
+    }
+
+    yyjson_doc_free(doc);
+    return result;
+}
+
+std::string ExtractElementWithRust(const std::string &html, const std::string &selector) {
+    if (html.empty() || selector.empty()) return "null";
+
+    auto ffi_result = extract_element_ffi(html.c_str(), html.length(), selector.c_str());
+    RustResult rust_result(ffi_result);
+
+    if (rust_result.HasError()) {
+        return "null";
+    }
+
+    return rust_result.GetJson();
+}
+
 } // namespace duckdb
 
 #else // RUST_PARSER_AVAILABLE not defined
@@ -623,6 +688,29 @@ std::string FetchSitemapWithRust(const std::string &request_json) {
 std::string CheckRobotsWithRust(const std::string &request_json) {
     (void)request_json;
     return "{\"allowed\":true,\"crawl_delay\":null,\"sitemaps\":[]}";
+}
+
+void SetInterrupted(bool value) {
+    (void)value;
+    // No-op when Rust parser not available
+}
+
+bool IsInterrupted() {
+    return false;
+}
+
+std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std::string &selector,
+                                               const std::string &base_url) {
+    (void)html;
+    (void)selector;
+    (void)base_url;
+    return {};
+}
+
+std::string ExtractElementWithRust(const std::string &html, const std::string &selector) {
+    (void)html;
+    (void)selector;
+    return "null";
 }
 
 } // namespace duckdb

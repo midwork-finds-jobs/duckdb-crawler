@@ -56,4 +56,17 @@ std::string FetchSitemapWithRust(const std::string &request_json);
 // Returns JSON response: {"allowed": true, "crawl_delay": 1.0, "sitemaps": [...]}
 std::string CheckRobotsWithRust(const std::string &request_json);
 
+// Signal handling for graceful shutdown
+void SetInterrupted(bool value);
+bool IsInterrupted();
+
+// Extract links from HTML using CSS selector
+// Returns vector of absolute URLs
+std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std::string &selector,
+                                               const std::string &base_url);
+
+// Extract element as JSON with text, html, and attr map
+// Returns JSON: {"text": "...", "html": "...", "attr": {"key": "value", ...}}
+std::string ExtractElementWithRust(const std::string &html, const std::string &selector);
+
 } // namespace duckdb

@@ -7,7 +7,8 @@ namespace duckdb {
 
 // Statement types for CRAWL parser
 enum class CrawlStatementType : uint8_t {
-	CRAWL      // CRAWL (...) INTO table
+	CRAWL,     // CRAWL (...) INTO table
+	STREAM     // STREAM (query) INTO table - incremental writes
 };
 
 // Extraction source types
@@ -36,7 +37,14 @@ struct ExtractSpec {
 	bool is_coalesce;      // true if this is a COALESCE expression
 	vector<string> coalesce_paths;  // Paths for COALESCE (source.path format)
 
-	ExtractSpec() : is_text(false), source(ExtractSource::JSONLD), is_coalesce(false) {}
+	// For JSON cast and array expansion (::json, [*], .field syntax)
+	bool is_json_cast;     // true if ::json suffix present
+	bool expand_array;     // true if [*] array expansion requested
+	string array_field;    // field to extract from each array element (e.g., "id" for [*].id)
+	string json_path;      // additional -> navigation after ::json cast
+
+	ExtractSpec() : is_text(false), source(ExtractSource::JSONLD), is_coalesce(false),
+	                is_json_cast(false), expand_array(false) {}
 };
 
 // Parsed data from CRAWL statement
@@ -96,7 +104,17 @@ struct CrawlParseData : public ParserExtensionParseData {
 	string ToString() const override;
 };
 
-// Parser extension for CRAWL statement
+// Parsed data from STREAM statement
+struct StreamParseData : public ParserExtensionParseData {
+	string source_query;      // The SELECT query to stream
+	string target_table;      // Table to insert results into
+	int64_t batch_size = 100; // Rows per batch write
+
+	unique_ptr<ParserExtensionParseData> Copy() const override;
+	string ToString() const override;
+};
+
+// Parser extension for CRAWL and STREAM statements
 class CrawlParserExtension : public ParserExtension {
 public:
 	CrawlParserExtension();

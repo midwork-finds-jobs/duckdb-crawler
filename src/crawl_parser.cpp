@@ -9,6 +9,21 @@
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
+// StreamParseData
+//===--------------------------------------------------------------------===//
+unique_ptr<ParserExtensionParseData> StreamParseData::Copy() const {
+	auto copy = make_uniq<StreamParseData>();
+	copy->source_query = source_query;
+	copy->target_table = target_table;
+	copy->batch_size = batch_size;
+	return copy;
+}
+
+string StreamParseData::ToString() const {
+	return "STREAM (" + source_query + ") INTO " + target_table;
+}
+
+//===--------------------------------------------------------------------===//
 // CrawlParseData
 //===--------------------------------------------------------------------===//
 unique_ptr<ParserExtensionParseData> CrawlParseData::Copy() const {
@@ -429,6 +444,158 @@ static bool ParseExtractClause(const string &extract_str, CrawlParseData &data) 
 			continue;
 		}
 
+		// Check for jQuery-like CSS selector: $('selector').text or $('selector').attr['href']
+		// Also supports ::json cast and [*] array expansion
+		if (StringUtil::StartsWith(spec_str, "$(") || StringUtil::StartsWith(spec_str, "$( ")) {
+			// First, extract alias if present
+			string jquery_expr = spec_str;
+			string jquery_alias;
+			size_t jq_as_pos = spec_lower.rfind(" as ");
+			if (jq_as_pos != string::npos) {
+				jquery_expr = Trim(spec_str.substr(0, jq_as_pos));
+				jquery_alias = Trim(spec_str.substr(jq_as_pos + 4));
+			}
+
+			// Parse jQuery-style selector
+			size_t paren_start = jquery_expr.find('(');
+			size_t quote_start = jquery_expr.find('\'', paren_start);
+			if (quote_start == string::npos) {
+				quote_start = jquery_expr.find('"', paren_start);
+			}
+
+			if (quote_start != string::npos) {
+				char quote_char = jquery_expr[quote_start];
+				size_t quote_end = jquery_expr.find(quote_char, quote_start + 1);
+				if (quote_end != string::npos) {
+					string selector = jquery_expr.substr(quote_start + 1, quote_end - quote_start - 1);
+
+					// Find closing paren
+					size_t paren_end = jquery_expr.find(')', quote_end);
+					if (paren_end != string::npos && paren_end + 1 < jquery_expr.length() &&
+					    jquery_expr[paren_end + 1] == '.') {
+						// Parse accessor: .text, .html, .attr['href']
+						string accessor_str = jquery_expr.substr(paren_end + 2);
+
+						// Use alias from "as" clause, or auto-generate
+						if (!jquery_alias.empty()) {
+							spec.alias = jquery_alias;
+						} else {
+							// Auto-generate alias from selector
+							size_t last_part = selector.rfind('.');
+							if (last_part != string::npos) {
+								spec.alias = selector.substr(last_part + 1);
+							} else {
+								spec.alias = "css_value";
+							}
+						}
+
+						spec.source = ExtractSource::CSS;
+						spec.path = selector;  // Store selector in path
+
+						// Check for ::json suffix and parse JSON-related modifiers
+						size_t json_cast_pos = accessor_str.find("::json");
+						string base_accessor = accessor_str;
+						if (json_cast_pos != string::npos) {
+							spec.is_json_cast = true;
+							base_accessor = accessor_str.substr(0, json_cast_pos);
+							string json_suffix = accessor_str.substr(json_cast_pos + 6);  // after ::json
+
+							// Check for [*] array expansion
+							if (json_suffix.length() >= 3 && json_suffix.substr(0, 3) == "[*]") {
+								spec.expand_array = true;
+								string after_star = json_suffix.substr(3);
+
+								// Check for .field path after [*]
+								if (!after_star.empty() && after_star[0] == '.') {
+									spec.array_field = after_star.substr(1);  // Skip the dot
+								}
+							}
+							// Check for -> navigation after ::json
+							else if (json_suffix.length() >= 2 && json_suffix.substr(0, 2) == "->") {
+								spec.json_path = json_suffix;
+							}
+						}
+
+						// Store accessor info (text, html, attr:name, or parent.*)
+						if (base_accessor == "text") {
+							spec.transform = "text";
+						} else if (base_accessor == "html") {
+							spec.transform = "html";
+						} else if (StringUtil::StartsWith(base_accessor, "attr[")) {
+							// Parse attr['href'] or attr["href"]
+							size_t attr_quote = base_accessor.find('\'', 5);
+							if (attr_quote == string::npos) {
+								attr_quote = base_accessor.find('"', 5);
+							}
+							if (attr_quote != string::npos) {
+								char attr_q = base_accessor[attr_quote];
+								size_t attr_end = base_accessor.find(attr_q, attr_quote + 1);
+								if (attr_end != string::npos) {
+									string attr_name = base_accessor.substr(attr_quote + 1, attr_end - attr_quote - 1);
+									spec.transform = "attr:" + attr_name;
+								}
+							}
+						} else if (StringUtil::StartsWith(base_accessor, "parent.")) {
+							// Parse parent.text, parent.html, parent.attr['name']
+							string parent_accessor = base_accessor.substr(7);  // Skip "parent."
+							if (parent_accessor == "text") {
+								spec.transform = "parent.text";
+							} else if (parent_accessor == "html") {
+								spec.transform = "parent.html";
+							} else if (StringUtil::StartsWith(parent_accessor, "attr[")) {
+								// Parse parent.attr['href']
+								size_t attr_quote = parent_accessor.find('\'', 5);
+								if (attr_quote == string::npos) {
+									attr_quote = parent_accessor.find('"', 5);
+								}
+								if (attr_quote != string::npos) {
+									char attr_q = parent_accessor[attr_quote];
+									size_t attr_end = parent_accessor.find(attr_q, attr_quote + 1);
+									if (attr_end != string::npos) {
+										string attr_name = parent_accessor.substr(attr_quote + 1, attr_end - attr_quote - 1);
+										spec.transform = "parent.attr:" + attr_name;
+									}
+								}
+							}
+						} else if (StringUtil::StartsWith(base_accessor, "children[")) {
+							// Parse children[N].text, children[N].html, children[N].attr['name']
+							size_t bracket_end = base_accessor.find(']', 9);
+							if (bracket_end != string::npos && bracket_end + 1 < base_accessor.length() &&
+							    base_accessor[bracket_end + 1] == '.') {
+								string index_str = base_accessor.substr(9, bracket_end - 9);
+								string child_accessor = base_accessor.substr(bracket_end + 2);
+
+								if (child_accessor == "text") {
+									spec.transform = "children." + index_str + ".text";
+								} else if (child_accessor == "html") {
+									spec.transform = "children." + index_str + ".html";
+								} else if (StringUtil::StartsWith(child_accessor, "attr[")) {
+									// Parse children[N].attr['href']
+									size_t attr_quote = child_accessor.find('\'', 5);
+									if (attr_quote == string::npos) {
+										attr_quote = child_accessor.find('"', 5);
+									}
+									if (attr_quote != string::npos) {
+										char attr_q = child_accessor[attr_quote];
+										size_t attr_end = child_accessor.find(attr_q, attr_quote + 1);
+										if (attr_end != string::npos) {
+											string attr_name = child_accessor.substr(attr_quote + 1, attr_end - attr_quote - 1);
+											spec.transform = "children." + index_str + ".attr:" + attr_name;
+										}
+									}
+								}
+							}
+						}
+
+						spec.expression = spec_str;
+						spec.is_text = true;
+						data.extract_specs.push_back(spec);
+						continue;
+					}
+				}
+			}
+		}
+
 		// Check for typed extraction: alias TYPE FROM source_expr [| transform]
 		// e.g., price DECIMAL FROM css '.price::text' | parse_price
 		size_t from_pos = spec_lower.find(" from ");
@@ -501,6 +668,50 @@ static bool ParseExtractClause(const string &extract_str, CrawlParseData &data) 
 		// Determine text output mode
 		spec.is_text = (spec.expression.find("->>") != string::npos);
 
+		// Check for [*] array expansion in arrow notation
+		// e.g., js->'jobs'->[*]->>'id' or jsonld->'offers'->[*]->'price'
+		size_t star_pos = spec.expression.find("->[*]");
+		if (star_pos != string::npos) {
+			spec.expand_array = true;
+			// Extract array field path after [*] (e.g., "id" from ->[*]->>'id')
+			string after_star = spec.expression.substr(star_pos + 5);
+			if (!after_star.empty()) {
+				// Parse any path after [*]
+				if (after_star.substr(0, 3) == "->>" || after_star.substr(0, 2) == "->") {
+					// Extract the remaining path segments
+					size_t key_start = (after_star[2] == '>') ? 3 : 2;
+					while (key_start < after_star.length() && std::isspace(after_star[key_start])) {
+						key_start++;
+					}
+					if (key_start < after_star.length()) {
+						// Handle quoted or unquoted keys
+						if (after_star[key_start] == '\'') {
+							size_t key_end = after_star.find('\'', key_start + 1);
+							if (key_end != string::npos) {
+								spec.array_field = after_star.substr(key_start + 1, key_end - key_start - 1);
+							}
+						} else if (after_star[key_start] == '"') {
+							size_t key_end = after_star.find('"', key_start + 1);
+							if (key_end != string::npos) {
+								spec.array_field = after_star.substr(key_start + 1, key_end - key_start - 1);
+							}
+						} else {
+							// Unquoted - take until next arrow or end
+							size_t key_end = after_star.find("->", key_start);
+							if (key_end == string::npos) {
+								spec.array_field = Trim(after_star.substr(key_start));
+							} else {
+								spec.array_field = Trim(after_star.substr(key_start, key_end - key_start));
+							}
+						}
+					}
+				} else if (after_star[0] == '.') {
+					// Dot notation: [*].id
+					spec.array_field = after_star.substr(1);
+				}
+			}
+		}
+
 		data.extract_specs.push_back(spec);
 	}
 
@@ -559,7 +770,11 @@ static string SerializeExtractSpecs(const vector<ExtractSpec> &specs) {
 		json += "\"path\":\"" + EscapeJsonString(spec.path) + "\",";
 		json += "\"target_type\":\"" + EscapeJsonString(spec.target_type) + "\",";
 		json += "\"transform\":\"" + EscapeJsonString(spec.transform) + "\",";
-		json += "\"is_coalesce\":" + string(spec.is_coalesce ? "true" : "false");
+		json += "\"is_coalesce\":" + string(spec.is_coalesce ? "true" : "false") + ",";
+		json += "\"is_json_cast\":" + string(spec.is_json_cast ? "true" : "false") + ",";
+		json += "\"expand_array\":" + string(spec.expand_array ? "true" : "false") + ",";
+		json += "\"array_field\":\"" + EscapeJsonString(spec.array_field) + "\",";
+		json += "\"json_path\":\"" + EscapeJsonString(spec.json_path) + "\"";
 
 		if (spec.is_coalesce && !spec.coalesce_paths.empty()) {
 			json += ",\"coalesce_paths\":[";
@@ -585,9 +800,85 @@ CrawlParserExtension::CrawlParserExtension() {
 }
 
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
-	// Check if query starts with CRAWL (case-insensitive)
+	// Check if query starts with CRAWL or STREAM (case-insensitive)
 	string trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
+
+	// Handle STREAM statement
+	if (StringUtil::StartsWith(lower, "stream")) {
+		auto data = make_uniq<StreamParseData>();
+
+		// Parse: STREAM (SELECT ...) INTO table_name [WITH (options)]
+		size_t keyword_end = 6; // "stream" length
+
+		// Find the opening parenthesis after STREAM
+		size_t paren_start = trimmed.find('(', keyword_end);
+		if (paren_start == string::npos) {
+			return ParserExtensionParseResult("STREAM syntax error: expected '(' after STREAM");
+		}
+
+		// Find matching closing parenthesis
+		size_t paren_end = FindClosingParen(trimmed, paren_start);
+		if (paren_end == string::npos) {
+			return ParserExtensionParseResult("STREAM syntax error: unmatched parenthesis");
+		}
+
+		// Extract source query
+		data->source_query = Trim(trimmed.substr(paren_start + 1, paren_end - paren_start - 1));
+
+		// Find INTO keyword
+		string remainder = trimmed.substr(paren_end + 1);
+		string remainder_lower = StringUtil::Lower(remainder);
+		size_t into_pos = remainder_lower.find("into");
+		if (into_pos == string::npos) {
+			return ParserExtensionParseResult("STREAM syntax error: expected INTO after source query");
+		}
+
+		// Extract table name (until WITH or end)
+		string after_into = Trim(remainder.substr(into_pos + 4));
+		string after_into_lower = StringUtil::Lower(after_into);
+		size_t with_pos = FindKeyword(after_into_lower, "with");
+
+		if (with_pos != string::npos) {
+			data->target_table = Trim(after_into.substr(0, with_pos));
+
+			// Parse WITH options
+			string after_with = Trim(after_into.substr(with_pos + 4));
+			if (!after_with.empty() && after_with.front() == '(') {
+				size_t with_paren_end = FindClosingParen(after_with, 0);
+				if (with_paren_end != string::npos) {
+					string options = after_with.substr(1, with_paren_end - 1);
+
+					// Parse batch_size and resume options
+					string options_lower = StringUtil::Lower(options);
+					size_t batch_pos = options_lower.find("batch_size");
+					if (batch_pos != string::npos) {
+						size_t val_start = options.find_first_of("0123456789", batch_pos);
+						if (val_start != string::npos) {
+							size_t val_end = options.find_first_not_of("0123456789", val_start);
+							string val = options.substr(val_start, val_end - val_start);
+							data->batch_size = std::stoll(val);
+						}
+					}
+
+				}
+			}
+		} else {
+			data->target_table = Trim(after_into);
+		}
+
+		// Remove trailing semicolon
+		if (!data->target_table.empty() && data->target_table.back() == ';') {
+			data->target_table.pop_back();
+			data->target_table = Trim(data->target_table);
+		}
+
+		if (data->target_table.empty()) {
+			return ParserExtensionParseResult("STREAM syntax error: target table name is required");
+		}
+
+		return ParserExtensionParseResult(std::move(data));
+	}
 
 	if (!StringUtil::StartsWith(lower, "crawl")) {
 		// Not a CRAWL statement, let default parser handle it
@@ -798,9 +1089,36 @@ ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo 
 
 ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
                                                           unique_ptr<ParserExtensionParseData> parse_data) {
-	auto &data = (CrawlParseData &)*parse_data;
 	auto &catalog = Catalog::GetSystemCatalog(context);
 	ParserExtensionPlanResult result;
+
+	// Check if this is a STREAM statement
+	if (dynamic_cast<StreamParseData *>(parse_data.get())) {
+		auto &stream_data = (StreamParseData &)*parse_data;
+
+		// Look up the registered stream_into_internal function
+		auto catalog_entry = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, DEFAULT_SCHEMA,
+		                                       "stream_into_internal", OnEntryNotFound::THROW_EXCEPTION);
+		auto &table_function_catalog_entry = catalog_entry->Cast<TableFunctionCatalogEntry>();
+
+		if (table_function_catalog_entry.functions.functions.empty()) {
+			throw BinderException("STREAM: stream_into_internal function not found");
+		}
+
+		result.function = table_function_catalog_entry.functions.functions[0];
+
+		// Pass parameters: source_query, target_table, batch_size
+		result.parameters.push_back(Value(stream_data.source_query));
+		result.parameters.push_back(Value(stream_data.target_table));
+		result.parameters.push_back(Value(stream_data.batch_size));
+
+		result.requires_valid_transaction = true;
+		result.return_type = StatementReturnType::CHANGED_ROWS;
+
+		return result;
+	}
+
+	auto &data = (CrawlParseData &)*parse_data;
 
 	// Look up the registered crawl_into_internal function from the catalog
 	auto catalog_entry = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, DEFAULT_SCHEMA,

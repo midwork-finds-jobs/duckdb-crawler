@@ -107,6 +107,8 @@ set(EXTENSION_SOURCES
     src/css_extract_function.cpp
     src/crawl_stream_function.cpp
     src/crawl_table_function.cpp
+    src/crawl_lateral_function.cpp
+    src/stream_into_function.cpp
     src/sitemap_function.cpp
     src/thread_utils.cpp
     src/robots_parser.cpp
@@ -114,11 +116,6 @@ set(EXTENSION_SOURCES
     src/crawl_parser.cpp
     src/sitemap_parser.cpp
     src/link_parser.cpp
-    src/jsonld_extractor.cpp
-    src/opengraph_extractor.cpp
-    src/hydration_extractor.cpp
-    src/js_variables_extractor.cpp
-    src/structured_data.cpp
     src/json_path_evaluator.cpp
 )
 

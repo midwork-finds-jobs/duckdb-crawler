@@ -6,16 +6,36 @@
 #include "css_extract_function.hpp"
 #include "crawl_stream_function.hpp"
 #include "crawl_table_function.hpp"
+#include "stream_into_function.hpp"
 #include "sitemap_function.hpp"
 #include "http_client.hpp"
+#include "rust_ffi.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/parser/parser_extension.hpp"
+#include <csignal>
+#include <atomic>
 
 namespace duckdb {
+
+// Store previous signal handler to restore on unload
+static std::sig_atomic_t g_signal_handler_installed = 0;
+static void (*g_previous_sigint_handler)(int) = SIG_DFL;
+
+// Signal handler for graceful shutdown
+static void CrawlerSignalHandler(int signum) {
+	if (signum == SIGINT) {
+		// Set the interrupt flag in Rust
+		SetInterrupted(true);
+		// Call previous handler if it was set
+		if (g_previous_sigint_handler != SIG_DFL && g_previous_sigint_handler != SIG_IGN) {
+			g_previous_sigint_handler(signum);
+		}
+	}
+}
 
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
@@ -51,10 +71,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register crawl() table function for clean FROM-based crawling
 	RegisterCrawlTableFunction(loader);
 
+	// Register crawl_url() for lateral joins
+	RegisterCrawlUrlFunction(loader);
+
 	// Register sitemap() table function for sitemap parsing
 	RegisterSitemapFunction(loader);
 
-	// Register CRAWL parser extension
+	// Register stream_into_internal() for STREAM INTO syntax
+	RegisterStreamIntoFunction(loader);
+
+	// Install signal handler for graceful shutdown (only once)
+	if (!g_signal_handler_installed) {
+		g_previous_sigint_handler = std::signal(SIGINT, CrawlerSignalHandler);
+		g_signal_handler_installed = 1;
+		// Reset interrupt flag
+		SetInterrupted(false);
+	}
+
+	// Register CRAWL and STREAM parser extension
 	ParserExtension parser_ext;
 	parser_ext.parse_function = CrawlParserExtension::ParseCrawl;
 	parser_ext.plan_function = CrawlParserExtension::PlanCrawl;
