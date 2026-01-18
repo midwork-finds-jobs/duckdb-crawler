@@ -1,60 +1,26 @@
 # DuckDB Crawler - TODO
 
-## Current Capabilities
+## Decisions Made
 
-┌────────────────────┬─────────┬──────────────────────────────────────────────────────┐
-│      Feature       │ Support │                        Notes                         │
-├────────────────────┼─────────┼──────────────────────────────────────────────────────┤
-│ HTTP/1.1           │ ✅      │ Full support via libcurl                             │
-├────────────────────┼─────────┼──────────────────────────────────────────────────────┤
-│ HTTP/2             │ ✅      │ Via libcurl + nghttp2                                │
-├────────────────────┼─────────┼──────────────────────────────────────────────────────┤
-│ HTTP/3             │ ❌      │ Blocked by vcpkg OpenSSL QUIC issue (see below)      │
-├────────────────────┼─────────┼──────────────────────────────────────────────────────┤
-│ Keep-alive         │ ✅      │ Via libcurl                                          │
-├────────────────────┼─────────┼──────────────────────────────────────────────────────┤
-│ Connection pooling │ ✅      │ Thread-safe curl handle pool (max 100 handles)       │
-└────────────────────┴─────────┴──────────────────────────────────────────────────────┘
+1. **htmlpath() naming**: Keep `htmlpath()`, use `jq()` as primary alias for simple CSS selections
+2. **MERGE unseen rows**: Keep unseen rows by default. Add `WHEN NOT MATCHED BY SOURCE` clause (SQL standard) between `WHEN MATCHED` and `LIMIT` for handling rows in target but not in source
+3. **SET crawler_option**: Implement `SET crawler_*` settings for global configuration
+4. **DuckDB http settings**: Read proxy and timeout from DuckDB's http_* settings
+5. **CREATE SECRET**: Integrate with DuckDB secrets for bearer tokens and extra headers
+6. **Per-domain overrides**: Not implementing (use WITH clause options instead)
 
-## HTTP/3 Options
+## Open Questions
 
-ngtcp2 fails to build because vcpkg's OpenSSL 3.6.0 doesn't expose QUIC APIs.
-Compile-time macros `CRAWLER_HTTP3_SUPPORT` are ready - just need working deps.
+* Ensure that robots.txt sitemap still works too and sitemap honours the crawl-delay in robots.txt
+    * Parse robots.txt into a cache which has 24 hours TTL
+* Build example SQL for crawling blog posts, product pages, jobs, events. Create unittests for those too.
 
-### Option 1: Use wolfSSL (Recommended)
+## In Progress
 
-vcpkg's wolfssl has `quic` feature. Update `vcpkg.json`:
-```json
-{
-    "dependencies": [
-        "zlib",
-        {"name": "wolfssl", "features": ["quic"]},
-        {"name": "ngtcp2", "features": ["wolfssl"]},
-        {"name": "nghttp3"},
-        {"name": "curl", "default-features": false, "features": ["ssl", "wolfssl", "http2", "http3"]}
-    ]
-}
-```
-
-### Option 2: Wait for vcpkg OpenSSL QUIC fix
-
-OpenSSL 3.5+ has QUIC APIs but vcpkg's port doesn't enable them.
-- Discussion: https://github.com/microsoft/vcpkg/discussions/27400
-- Could file issue requesting `openssl` port add `quic` feature
-
-### Option 3: Use system OpenSSL
-
-macOS Homebrew or system OpenSSL might have QUIC enabled.
-Would need to bypass vcpkg for TLS libs.
-
-## Current Issues
-
-### 1. True multi-threading not implemented (F1)
-**Status**: Backlog
-
-- Single-threaded crawl processing
-- Would provide 10-50x throughput for multi-domain crawls
-- Requires per-domain locks, thread pool
+- [ ] SET crawler_* settings (user_agent, default_delay, respect_robots, timeout)
+- [ ] DuckDB http_proxy, http_timeout integration
+- [ ] CREATE SECRET integration for authenticated crawling
+- [ ] WHEN NOT MATCHED BY SOURCE clause in STREAM INTO MERGE
 
 ## Implemented Features
 
@@ -78,3 +44,5 @@ Would need to bypass vcpkg for TLS libs.
 - [x] G5: Redirect tracking (final_url, redirect_count columns)
 - [x] N5: Meta robots tag support (noindex clears body, nofollow skips link extraction)
 - [x] Large HTTP headers support (libcurl has no header size limit)
+- [x] html.readability extraction (title, content, text_content, excerpt)
+- [x] html.schema as MAP(VARCHAR, JSON) with array support for multiple items
