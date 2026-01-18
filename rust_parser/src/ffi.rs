@@ -411,6 +411,58 @@ pub unsafe extern "C" fn extract_element_ffi(
     }
 }
 
+/// Extract using unified path syntax: css@attr[*].json.path
+///
+/// Examples:
+/// - `input#jobs@value` -> attribute value as string
+/// - `input#jobs@value[*]` -> JSON array of all elements
+/// - `input#jobs@value[*].id` -> array of 'id' fields
+#[no_mangle]
+pub unsafe extern "C" fn extract_path_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+    path_ptr: *const c_char,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let path = match CStr::from_ptr(path_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid path: {}", e)),
+            };
+        }
+    };
+
+    match crate::extractors::extract_path(html, path) {
+        Some(value) => {
+            match serde_json::to_string(&value) {
+                Ok(json) => ExtractionResultFFI {
+                    json_ptr: string_to_ptr(json),
+                    error_ptr: ptr::null_mut(),
+                },
+                Err(e) => ExtractionResultFFI {
+                    json_ptr: ptr::null_mut(),
+                    error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+                },
+            }
+        }
+        None => ExtractionResultFFI {
+            json_ptr: string_to_ptr("null".to_string()),
+            error_ptr: ptr::null_mut(),
+        },
+    }
+}
+
 // ============================================================================
 // Batch Crawl + Extract (HTTP in Rust)
 // ============================================================================

@@ -81,6 +81,9 @@ static void StreamIntoFunction(ClientContext &context, TableFunctionInput &data,
 
     Connection conn(*context.db);
 
+    // Load the crawler extension in the new connection (required for crawl functions)
+    conn.Query("LOAD crawler");
+
     // Execute source query
     auto query_result = conn.Query(bind_data.source_query);
     if (query_result->HasError()) {

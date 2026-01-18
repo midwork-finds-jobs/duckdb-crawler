@@ -41,6 +41,9 @@ extern "C" {
     // Element extraction (returns text, html, and all attributes)
     ExtractionResultFFI extract_element_ffi(const char *html_ptr, size_t html_len,
                                              const char *selector);
+    // Unified path extraction: css@attr[*].json.path
+    ExtractionResultFFI extract_path_ffi(const char *html_ptr, size_t html_len,
+                                          const char *path);
 }
 
 namespace duckdb {
@@ -608,6 +611,19 @@ std::string ExtractElementWithRust(const std::string &html, const std::string &s
     return rust_result.GetJson();
 }
 
+std::string ExtractPathWithRust(const std::string &html, const std::string &path) {
+    if (html.empty() || path.empty()) return "null";
+
+    auto ffi_result = extract_path_ffi(html.c_str(), html.length(), path.c_str());
+    RustResult rust_result(ffi_result);
+
+    if (rust_result.HasError()) {
+        return "null";
+    }
+
+    return rust_result.GetJson();
+}
+
 } // namespace duckdb
 
 #else // RUST_PARSER_AVAILABLE not defined
@@ -710,6 +726,12 @@ std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std
 std::string ExtractElementWithRust(const std::string &html, const std::string &selector) {
     (void)html;
     (void)selector;
+    return "null";
+}
+
+std::string ExtractPathWithRust(const std::string &html, const std::string &path) {
+    (void)html;
+    (void)path;
     return "null";
 }
 

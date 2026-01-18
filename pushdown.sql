@@ -8,62 +8,37 @@
 
 LOAD 'build/release/extension/crawler/crawler.duckdb_extension';
 
--- Create jobs table for storing extracted job data
-CREATE TABLE IF NOT EXISTS jobs (
-    url VARCHAR,
-    id VARCHAR PRIMARY KEY,
-    posting_title VARCHAR,
-    city VARCHAR,
-    state VARCHAR,
-    country VARCHAR,
-    industry VARCHAR,
-    job_type VARCHAR,
-    work_experience VARCHAR,
-    remote_job BOOLEAN,
-    date_opened DATE,
-    salary VARCHAR,
-    job_description TEXT,
-    crawled_at TIMESTAMP DEFAULT current_timestamp
-);
+-- Create or replace jobs table for crawl results
+DROP TABLE IF EXISTS jobs;
 
--- Two-stage crawl using CTEs with LATERAL join
--- Stage 1: Get job URLs from listing pages
--- Stage 2: Crawl each detail page via LATERAL crawl_url() (supports column references)
+-- Two-stage crawl: listing pages -> detail pages via LATERAL crawl_url()
 STREAM (
     WITH job_urls AS (
-        SELECT
-            -- rtrim to remove trailing slash before appending path
-            format('{}jobs/Careers/{}', rtrim(url, '/') || '/', job->>'id') as job_url
-        FROM (
-            SELECT url, unnest(jq(html.document, 'input#jobs', 'value')::JSON[]) as job
-            FROM crawl(
-                ['https://carrieres.os4techno.com/', 'https://recruit.srilankan.com/'],
-                user_agent = 'JobCrawler/1.0'
-            )
-            WHERE status = 200
-        )
-        WHERE job->>'id' IS NOT NULL
+        SELECT url, unnest(htmlpath(html.document, 'input#jobs@value[*]')::JSON[]) as job
+        FROM crawl(['https://carrieres.os4techno.com/', 'https://recruit.srilankan.com/'])
+        WHERE status = 200
+    ),
+    job_pages AS (
+        SELECT c.url, c.html.js['jobs'][0] as job
+        FROM job_urls j, LATERAL crawl_url(format('{}/jobs/Careers/{}', rtrim(j.url,'/'), j.job->>'id')) c
+        WHERE c.status = 200 AND c.html.js['jobs'] IS NOT NULL
     )
-    -- html.js['jobs'] is an array, access first element with [0]
     SELECT
-        c.url,
-        c.html.js['jobs'][0]->>'id' as id,
-        c.html.js['jobs'][0]->>'Posting_Title' as posting_title,
-        c.html.js['jobs'][0]->>'City' as city,
-        c.html.js['jobs'][0]->>'State' as state,
-        c.html.js['jobs'][0]->>'Country' as country,
-        c.html.js['jobs'][0]->>'Industry' as industry,
-        c.html.js['jobs'][0]->>'Job_Type' as job_type,
-        c.html.js['jobs'][0]->>'Work_Experience' as work_experience,
-        COALESCE(CAST(c.html.js['jobs'][0]->>'Remote_Job' AS BOOLEAN), false) as remote_job,
-        TRY_CAST(c.html.js['jobs'][0]->>'Date_Opened' AS DATE) as date_opened,
-        c.html.js['jobs'][0]->>'Salary' as salary,
-        c.html.js['jobs'][0]->>'Job_Description' as job_description,
-        current_timestamp as crawled_at
-    FROM job_urls,
-         LATERAL crawl_url(job_url) c
-    WHERE c.status = 200 AND c.html.js['jobs'] IS NOT NULL
-) INTO jobs WITH (batch_size 50);
+        url,
+        job->>'id' as id,
+        job->>'Posting_Title' as posting_title,
+        job->>'City' as city,
+        job->>'State' as state,
+        job->>'Country' as country,
+        job->>'Industry' as industry,
+        job->>'Job_Type' as job_type,
+        job->>'Work_Experience' as work_experience,
+        (job->>'Remote_Job')::BOOLEAN as remote_job,
+        (job->>'Date_Opened')::DATE as date_opened,
+        job->>'Salary' as salary,
+        job->>'Job_Description' as job_description
+    FROM job_pages
+) INTO jobs;
 
 -- Show results
 SELECT 'Crawl complete!' as status;

@@ -69,4 +69,11 @@ std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std
 // Returns JSON: {"text": "...", "html": "...", "attr": {"key": "value", ...}}
 std::string ExtractElementWithRust(const std::string &html, const std::string &selector);
 
+// Extract using unified path syntax: css@attr[*].json.path
+// Examples:
+//   input#jobs@value         -> attribute value as string
+//   input#jobs@value[*]      -> JSON array
+//   input#jobs@value[*].id   -> array of 'id' fields
+std::string ExtractPathWithRust(const std::string &html, const std::string &path);
+
 } // namespace duckdb

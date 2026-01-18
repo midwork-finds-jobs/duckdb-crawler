@@ -313,7 +313,33 @@ static void JqAttrFunction(DataChunk &args, ExpressionState &state, Vector &resu
         });
 }
 
+// htmlpath(html, path) -> JSON
+// Unified path syntax: css@attr[*].json.path
+// Examples:
+//   htmlpath(doc, 'input#jobs@value')           -> attribute value
+//   htmlpath(doc, 'input#jobs@value[*]')        -> JSON array
+//   htmlpath(doc, 'input#jobs@value[*].id')     -> array of 'id' fields
+static void HtmlPathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &html_vec = args.data[0];
+    auto &path_vec = args.data[1];
+
+    BinaryExecutor::Execute<string_t, string_t, string_t>(
+        html_vec, path_vec, result, args.size(),
+        [&result](string_t html, string_t path) {
+            string json_result = ExtractPathWithRust(html.GetString(), path.GetString());
+            return StringVector::AddString(result, json_result);
+        });
+}
+
 void RegisterCssExtractFunction(ExtensionLoader &loader) {
+    // htmlpath(html, path) -> JSON
+    // Unified path syntax: css@attr[*].json.path
+    ScalarFunction htmlpath_func("htmlpath",
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},
+        LogicalType::JSON(),
+        HtmlPathFunction);
+    loader.RegisterFunction(htmlpath_func);
+
     // jq(html, selector) -> STRUCT(text, html, attr MAP)
     // Named 'jq' for jQuery-like CSS selection syntax
     ScalarFunction css_struct_func("jq",

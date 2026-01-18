@@ -562,6 +562,125 @@ pub fn extract_element(html: &str, selector: &str) -> Option<serde_json::Value> 
     }))
 }
 
+/// Unified path selector for HTML extraction
+///
+/// Syntax: `css_selector@attr[*].json.path`
+///
+/// Examples:
+/// - `input#jobs@value` - get value attribute of input#jobs
+/// - `input#jobs@value[*]` - parse as JSON array, return all elements
+/// - `input#jobs@value[*].id` - extract 'id' from each array element
+/// - `.product@data-json.price` - get data-json attr, extract .price
+/// - `script#config@text.settings.theme` - get text content, navigate JSON
+///
+/// Returns:
+/// - Single value: JSON string
+/// - Array with [*]: JSON array of values
+pub fn extract_path(html: &str, path: &str) -> Option<serde_json::Value> {
+    let document = Html::parse_document(html);
+
+    // Parse the path syntax
+    let (css_selector, attr_name, expand_array, json_path) = parse_path_syntax(path)?;
+
+    // Get the CSS element
+    let sel = Selector::parse(&css_selector).ok()?;
+    let element = document.select(&sel).next()?;
+
+    // Get the raw value (attribute or text)
+    let raw_value = if attr_name == "text" || attr_name == "innerText" {
+        element.text().collect::<String>().trim().to_string()
+    } else if attr_name == "html" || attr_name == "innerHTML" {
+        element.inner_html()
+    } else {
+        element.value().attr(&attr_name)?.to_string()
+    };
+
+    // If no JSON path and no array expansion, return raw string
+    if json_path.is_empty() && !expand_array {
+        return Some(serde_json::Value::String(raw_value));
+    }
+
+    // Parse as JSON
+    let json_val: serde_json::Value = serde_json::from_str(&raw_value).ok()?;
+
+    // Handle array expansion
+    if expand_array {
+        let arr = json_val.as_array()?;
+
+        if json_path.is_empty() {
+            // Return the whole array
+            return Some(serde_json::Value::Array(arr.clone()));
+        }
+
+        // Extract field from each element
+        let extracted: Vec<serde_json::Value> = arr
+            .iter()
+            .filter_map(|item| navigate_json(&item, &json_path))
+            .collect();
+
+        return Some(serde_json::Value::Array(extracted));
+    }
+
+    // Navigate JSON path without array expansion
+    navigate_json(&json_val, &json_path)
+}
+
+/// Parse the unified path syntax
+/// Returns: (css_selector, attr_name, expand_array, json_path_parts)
+fn parse_path_syntax(path: &str) -> Option<(String, String, bool, Vec<String>)> {
+    let mut remaining = path.trim();
+
+    // Find @ for attribute (scan backwards to handle @ in CSS selectors)
+    let at_pos = remaining.rfind('@')?;
+
+    let css_selector = remaining[..at_pos].trim().to_string();
+    remaining = &remaining[at_pos + 1..];
+
+    // Check for [*] array expansion
+    let expand_array;
+    let after_bracket;
+    if let Some(bracket_pos) = remaining.find("[*]") {
+        expand_array = true;
+        let attr_part = &remaining[..bracket_pos];
+        after_bracket = &remaining[bracket_pos + 3..];
+        remaining = attr_part;
+
+        // Get JSON path after [*]
+        let json_path = if after_bracket.starts_with('.') {
+            after_bracket[1..].split('.').map(|s| s.to_string()).collect()
+        } else {
+            Vec::new()
+        };
+
+        let attr_name = remaining.split('.').next()?.to_string();
+        return Some((css_selector, attr_name, expand_array, json_path));
+    } else {
+        expand_array = false;
+    }
+
+    // Parse attr.json.path
+    let parts: Vec<&str> = remaining.split('.').collect();
+    let attr_name = parts[0].to_string();
+    let json_path: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+
+    Some((css_selector, attr_name, expand_array, json_path))
+}
+
+/// Navigate a JSON value by path parts
+fn navigate_json(value: &serde_json::Value, path: &[String]) -> Option<serde_json::Value> {
+    let mut current = value.clone();
+
+    for part in path {
+        current = if let Ok(idx) = part.parse::<usize>() {
+            current.get(idx)?.clone()
+        } else {
+            current.get(part)?.clone()
+        };
+    }
+
+    Some(current)
+}
+
 /// Extract JavaScript variables from script tags using AST parsing
 pub fn extract_js_variables(document: &Html) -> HashMap<String, Value> {
     let mut result = HashMap::new();
