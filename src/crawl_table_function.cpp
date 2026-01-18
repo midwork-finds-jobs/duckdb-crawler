@@ -512,6 +512,21 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
                                            vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlBindData>();
 
+    // Read extension settings as defaults
+    Value setting_value;
+    if (context.TryGetCurrentSetting("crawler_user_agent", setting_value)) {
+        bind_data->user_agent = setting_value.ToString();
+    }
+    if (context.TryGetCurrentSetting("crawler_default_delay", setting_value)) {
+        bind_data->delay_ms = static_cast<int>(setting_value.GetValue<double>() * 1000);
+    }
+    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
+        bind_data->timeout_ms = static_cast<int>(setting_value.GetValue<int64_t>());
+    }
+    if (context.TryGetCurrentSetting("crawler_respect_robots", setting_value)) {
+        bind_data->respect_robots = setting_value.GetValue<bool>();
+    }
+
     // First argument: URL list or single URL string
     auto &first_arg = input.inputs[0];
     if (first_arg.type().id() == LogicalTypeId::LIST) {

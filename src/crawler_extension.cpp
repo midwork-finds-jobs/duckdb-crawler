@@ -6,9 +6,8 @@
 #include "css_extract_function.hpp"
 #include "crawl_stream_function.hpp"
 #include "crawl_table_function.hpp"
-#include "stream_into_function.hpp"
+#include "stream_merge_function.hpp"
 #include "sitemap_function.hpp"
-#include "http_client.hpp"
 #include "rust_ffi.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -56,11 +55,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::DOUBLE,
 	                          Value(1.0));
 
-	// Initialize HTTP client (libcurl with connection pooling)
-	InitializeHttpClient();
+	// Register crawler_timeout_ms setting
+	config.AddExtensionOption("crawler_timeout_ms",
+	                          "HTTP request timeout in milliseconds",
+	                          LogicalType::BIGINT,
+	                          Value::BIGINT(30000));
 
-	// Register crawl_into_internal() table function for CRAWL INTO syntax
-	RegisterCrawlIntoFunction(loader);
+	// Register crawler_respect_robots setting
+	config.AddExtensionOption("crawler_respect_robots",
+	                          "Whether to respect robots.txt directives",
+	                          LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(true));
+
+	// Register crawler_max_response_bytes setting
+	config.AddExtensionOption("crawler_max_response_bytes",
+	                          "Maximum response body size in bytes (0 = unlimited)",
+	                          LogicalType::BIGINT,
+	                          Value::BIGINT(10485760)); // 10MB default
 
 	// Register $() scalar function for CSS extraction
 	RegisterCssExtractFunction(loader);
@@ -77,8 +88,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register sitemap() table function for sitemap parsing
 	RegisterSitemapFunction(loader);
 
-	// Register stream_into_internal() for STREAM INTO syntax
-	RegisterStreamIntoFunction(loader);
+	// Register stream_merge_internal() for STREAM INTO ... USING ... ON (merge) syntax
+	RegisterStreamMergeFunction(loader);
 
 	// Install signal handler for graceful shutdown (only once)
 	if (!g_signal_handler_installed) {

@@ -10,10 +10,9 @@
 #include "crawler_internal.hpp"
 #include "crawler_utils.hpp"
 #include "thread_utils.hpp"
-#include "robots_parser.hpp"
-#include "http_client.hpp"
 #include "link_parser.hpp"
 #include "rust_ffi.hpp"
+#include "yyjson.hpp"
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -27,6 +26,138 @@
 #include <atomic>
 
 namespace duckdb {
+
+using namespace duckdb_yyjson;
+
+// Build robots check request JSON
+static string BuildRobotsCheckRequest(const string &url, const string &user_agent) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    if (!doc) return "{}";
+
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    yyjson_mut_obj_add_strcpy(doc, root, "url", url.c_str());
+    yyjson_mut_obj_add_strcpy(doc, root, "user_agent", user_agent.c_str());
+
+    size_t len = 0;
+    char *json_str = yyjson_mut_write(doc, 0, &len);
+    yyjson_mut_doc_free(doc);
+    if (!json_str) return "{}";
+
+    string result(json_str, len);
+    free(json_str);
+    return result;
+}
+
+// Parse robots check response
+static bool ParseRobotsCheckResponse(const string &response_json, const string &path) {
+    yyjson_doc *doc = yyjson_read(response_json.c_str(), response_json.size(), 0);
+    if (!doc) return true;  // Allow on error
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+    yyjson_val *allowed = yyjson_obj_get(root, "allowed");
+
+    bool result = true;
+    if (allowed && yyjson_is_bool(allowed)) {
+        result = yyjson_get_bool(allowed);
+    }
+
+    yyjson_doc_free(doc);
+    return result;
+}
+
+// Build batch crawl request JSON (for single URL)
+static string BuildStreamCrawlRequest(const string &url, const string &user_agent, int timeout_ms) {
+    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+    if (!doc) return "{}";
+
+    yyjson_mut_val *root = yyjson_mut_obj(doc);
+    yyjson_mut_doc_set_root(doc, root);
+
+    // URLs array
+    yyjson_mut_val *urls_arr = yyjson_mut_arr(doc);
+    yyjson_mut_arr_add_strcpy(doc, urls_arr, url.c_str());
+    yyjson_mut_obj_add_val(doc, root, "urls", urls_arr);
+
+    // Options
+    yyjson_mut_obj_add_strcpy(doc, root, "user_agent", user_agent.c_str());
+    yyjson_mut_obj_add_uint(doc, root, "timeout_ms", timeout_ms);
+    yyjson_mut_obj_add_uint(doc, root, "concurrency", 1);
+    yyjson_mut_obj_add_uint(doc, root, "delay_ms", 0);
+    yyjson_mut_obj_add_bool(doc, root, "respect_robots", false);  // Already checked manually
+
+    size_t len = 0;
+    char *json_str = yyjson_mut_write(doc, 0, &len);
+    yyjson_mut_doc_free(doc);
+    if (!json_str) return "{}";
+
+    string result(json_str, len);
+    free(json_str);
+    return result;
+}
+
+// Parse stream crawl response (fills BatchCrawlEntry)
+static bool ParseStreamCrawlResponse(const string &response_json, BatchCrawlEntry &entry) {
+    yyjson_doc *doc = yyjson_read(response_json.c_str(), response_json.size(), 0);
+    if (!doc) return false;
+
+    yyjson_val *root = yyjson_doc_get_root(doc);
+
+    // Check for error
+    yyjson_val *error = yyjson_obj_get(root, "error");
+    if (error && yyjson_is_str(error)) {
+        entry.error = yyjson_get_str(error);
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    yyjson_val *results_arr = yyjson_obj_get(root, "results");
+    if (!results_arr || !yyjson_is_arr(results_arr) || yyjson_arr_size(results_arr) == 0) {
+        yyjson_doc_free(doc);
+        return false;
+    }
+
+    yyjson_val *item = yyjson_arr_get_first(results_arr);
+
+    // Parse fields
+    yyjson_val *status_val = yyjson_obj_get(item, "status");
+    if (status_val && yyjson_is_int(status_val)) {
+        entry.status_code = (int)yyjson_get_int(status_val);
+    }
+
+    yyjson_val *ct_val = yyjson_obj_get(item, "content_type");
+    if (ct_val && yyjson_is_str(ct_val)) {
+        entry.content_type = yyjson_get_str(ct_val);
+    }
+
+    yyjson_val *body_val = yyjson_obj_get(item, "body");
+    if (body_val && yyjson_is_str(body_val)) {
+        entry.body = yyjson_get_str(body_val);
+    }
+
+    yyjson_val *error_val = yyjson_obj_get(item, "error");
+    if (error_val && yyjson_is_str(error_val)) {
+        entry.error = yyjson_get_str(error_val);
+    }
+
+    yyjson_val *time_val = yyjson_obj_get(item, "response_time_ms");
+    if (time_val && yyjson_is_int(time_val)) {
+        entry.elapsed_ms = yyjson_get_int(time_val);
+    }
+
+    yyjson_val *final_url_val = yyjson_obj_get(item, "final_url");
+    if (final_url_val && yyjson_is_str(final_url_val)) {
+        entry.final_url = yyjson_get_str(final_url_val);
+    }
+
+    yyjson_val *redirect_val = yyjson_obj_get(item, "redirect_count");
+    if (redirect_val && yyjson_is_int(redirect_val)) {
+        entry.redirect_count = (int)yyjson_get_int(redirect_val);
+    }
+
+    yyjson_doc_free(doc);
+    return true;
+}
 
 // Bind data for streaming crawl
 struct CrawlStreamBindData : public TableFunctionData {
@@ -93,9 +224,12 @@ static void StreamCrawlWorker(
     CrawlStreamGlobalState &global_state,
     int worker_id
 ) {
+    (void)worker_id;  // Unused
     global_state.result_queue->active_workers.fetch_add(1);
 
-    ThreadSafeDomainMap domain_states;
+    // Cache robots.txt results per domain
+    std::map<string, bool> robots_cache;
+    std::mutex robots_mutex;
 
     while (!global_state.should_stop.load()) {
         // Get next URL to process
@@ -106,57 +240,45 @@ static void StreamCrawlWorker(
 
         const string &url = bind_data.urls[url_idx];
         string domain = ExtractDomain(url);
+        string path = ExtractPath(url);
 
         // Check robots.txt if needed
         bool robots_allow = true;
         if (bind_data.respect_robots_txt) {
-            auto &domain_state = domain_states.GetOrCreate(domain);
-            std::lock_guard<std::mutex> lock(domain_state.mutex);
-
-            if (!domain_state.robots_fetched) {
-                string robots_url = "https://" + domain + "/robots.txt";
-                RetryConfig retry_config;
-                auto response = HttpClient::Fetch(robots_url, retry_config, bind_data.user_agent);
-                if (response.success) {
-                    auto robots_data = RobotsParser::Parse(response.body);
-                    domain_state.rules = RobotsParser::GetRulesForUserAgent(robots_data, bind_data.user_agent);
-                }
-                domain_state.robots_fetched = true;
+            std::lock_guard<std::mutex> lock(robots_mutex);
+            auto it = robots_cache.find(url);
+            if (it != robots_cache.end()) {
+                robots_allow = it->second;
+            } else {
+                // Check with Rust
+                string robots_request = BuildRobotsCheckRequest(url, bind_data.user_agent);
+                string robots_response = CheckRobotsWithRust(robots_request);
+                robots_allow = ParseRobotsCheckResponse(robots_response, path);
+                robots_cache[url] = robots_allow;
             }
-
-            robots_allow = RobotsParser::IsAllowed(domain_state.rules, ExtractPath(url));
         }
 
         if (!robots_allow) {
             continue;
         }
 
-        // Fetch the URL
-        RetryConfig retry_config;
-        retry_config.max_retries = 2;
-        // Note: timeout is controlled via global HttpSettings, not RetryConfig
-
-        auto response = HttpClient::Fetch(url, retry_config, bind_data.user_agent);
+        // Fetch the URL using Rust
+        string request_json = BuildStreamCrawlRequest(url, bind_data.user_agent,
+                                                       bind_data.timeout_seconds * 1000);
+        string response_json = CrawlBatchWithRust(request_json);
 
         // Build result entry
         BatchCrawlEntry entry;
         entry.url = url;
-        entry.status_code = response.status_code;
-        entry.content_type = response.content_type;
-        entry.body = response.body;
-        entry.error = response.error;
-        entry.elapsed_ms = 0;  // Not tracked in simple fetch
-        entry.final_url = response.final_url;
-        entry.redirect_count = response.redirect_count;
+        ParseStreamCrawlResponse(response_json, entry);
 
         // Extract structured data using Rust if successful
-        if (response.success && !response.body.empty()) {
-            bool is_html = (response.content_type.find("text/html") != string::npos ||
-                           response.content_type.find("application/xhtml") != string::npos);
+        if (entry.status_code >= 200 && entry.status_code < 300 && !entry.body.empty()) {
+            bool is_html = (entry.content_type.find("text/html") != string::npos ||
+                           entry.content_type.find("application/xhtml") != string::npos);
             if (is_html) {
-                entry.jsonld = ExtractJsonLdWithRust(response.body);
-                entry.opengraph = ExtractOpenGraphWithRust(response.body);
-                // meta extracted via opengraph (contains meta tags)
+                entry.jsonld = ExtractJsonLdWithRust(entry.body);
+                entry.opengraph = ExtractOpenGraphWithRust(entry.body);
             }
         }
 
@@ -181,6 +303,21 @@ static void StreamCrawlWorker(
 static unique_ptr<FunctionData> CrawlStreamBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlStreamBindData>();
+
+    // Read extension settings as defaults
+    Value setting_value;
+    if (context.TryGetCurrentSetting("crawler_user_agent", setting_value)) {
+        bind_data->user_agent = setting_value.ToString();
+    }
+    if (context.TryGetCurrentSetting("crawler_default_delay", setting_value)) {
+        bind_data->crawl_delay = setting_value.GetValue<double>();
+    }
+    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
+        bind_data->timeout_seconds = static_cast<int>(setting_value.GetValue<int64_t>() / 1000);
+    }
+    if (context.TryGetCurrentSetting("crawler_respect_robots", setting_value)) {
+        bind_data->respect_robots_txt = setting_value.GetValue<bool>();
+    }
 
     // First argument is list of URLs
     auto &url_list = ListValue::GetChildren(input.inputs[0]);
@@ -227,6 +364,21 @@ static unique_ptr<FunctionData> CrawlStreamBind(ClientContext &context, TableFun
 static unique_ptr<FunctionData> CrawlStreamBindQuery(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlStreamBindData>();
+
+    // Read extension settings as defaults
+    Value setting_value;
+    if (context.TryGetCurrentSetting("crawler_user_agent", setting_value)) {
+        bind_data->user_agent = setting_value.ToString();
+    }
+    if (context.TryGetCurrentSetting("crawler_default_delay", setting_value)) {
+        bind_data->crawl_delay = setting_value.GetValue<double>();
+    }
+    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
+        bind_data->timeout_seconds = static_cast<int>(setting_value.GetValue<int64_t>() / 1000);
+    }
+    if (context.TryGetCurrentSetting("crawler_respect_robots", setting_value)) {
+        bind_data->respect_robots_txt = setting_value.GetValue<bool>();
+    }
 
     // First argument is a query string
     bind_data->source_query = StringValue::Get(input.inputs[0]);

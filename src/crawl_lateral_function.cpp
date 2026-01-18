@@ -491,6 +491,15 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
                                               vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlUrlBindData>();
 
+    // Read extension settings as defaults
+    Value setting_value;
+    if (context.TryGetCurrentSetting("crawler_user_agent", setting_value)) {
+        bind_data->user_agent = setting_value.ToString();
+    }
+    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
+        bind_data->timeout_ms = static_cast<int>(setting_value.GetValue<int64_t>());
+    }
+
     // Check for optional second positional argument (max_results)
     // This enables LIMIT pushdown in LATERAL joins where named params don't work
     if (input.inputs.size() > 1 && !input.inputs[1].IsNull()) {
