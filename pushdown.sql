@@ -41,4 +41,9 @@ SELECT
     job->>'Salary' as salary,
     job->>'Job_Description' as job_description
 FROM job_pages
-LIMIT 5;
+LIMIT 2;
+
+-- Show cached requests
+SELECT url, status_code, content_type, cached_at
+FROM __crawler_cache
+ORDER BY cached_at DESC;

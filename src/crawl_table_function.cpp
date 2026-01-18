@@ -548,10 +548,10 @@ static void SaveToStateTable(Connection &conn, const string &table_name, const C
 }
 
 //===--------------------------------------------------------------------===//
-// HTTP Cache Table Management (__crawler__cache)
+// HTTP Cache Table Management (__crawler_cache)
 //===--------------------------------------------------------------------===//
 
-static constexpr const char* CACHE_TABLE_NAME = "__crawler__cache";
+static constexpr const char* CACHE_TABLE_NAME = "__crawler_cache";
 
 static void EnsureCacheTable(Connection &conn) {
     string sql = "CREATE TABLE IF NOT EXISTS " + string(CACHE_TABLE_NAME) + " ("
