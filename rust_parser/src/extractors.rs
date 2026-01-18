@@ -564,17 +564,19 @@ pub fn extract_element(html: &str, selector: &str) -> Option<serde_json::Value> 
 
 /// Unified path selector for HTML extraction
 ///
-/// Syntax: `css_selector@attr[*].json.path`
+/// Syntax: `css_selector@attr[*].json.path` or `css_selector@$jsvar[*].json.path`
 ///
 /// Examples:
 /// - `input#jobs@value` - get value attribute of input#jobs
 /// - `input#jobs@value[*]` - parse as JSON array, return all elements
 /// - `input#jobs@value[*].id` - extract 'id' from each array element
 /// - `.product@data-json.price` - get data-json attr, extract .price
-/// - `script#config@text.settings.theme` - get text content, navigate JSON
+/// - `script@$jobs` - get JS variable 'jobs' from script text
+/// - `script@$jobs[0]` - get first element of jobs array
+/// - `script@$jobs[*].id` - extract 'id' from each element
 ///
 /// Returns:
-/// - Single value: JSON string
+/// - Single value: JSON value
 /// - Array with [*]: JSON array of values
 pub fn extract_path(html: &str, path: &str) -> Option<serde_json::Value> {
     let document = Html::parse_document(html);
@@ -582,8 +584,36 @@ pub fn extract_path(html: &str, path: &str) -> Option<serde_json::Value> {
     // Parse the path syntax
     let (css_selector, attr_name, expand_array, json_path) = parse_path_syntax(path)?;
 
-    // Get the CSS element
-    let sel = Selector::parse(&css_selector).ok()?;
+    // Check if this is a JS variable reference (@$varname)
+    let is_js_var = attr_name.starts_with('$');
+
+    // Get the CSS element (default to searching all scripts for JS vars)
+    let effective_selector = if is_js_var && css_selector.is_empty() {
+        "script".to_string()
+    } else if css_selector.is_empty() {
+        return None;
+    } else {
+        css_selector
+    };
+
+    let sel = Selector::parse(&effective_selector).ok()?;
+
+    // For JS variables, search through matching script elements
+    if is_js_var {
+        let var_name = &attr_name[1..]; // strip the $
+
+        for element in document.select(&sel) {
+            let script_text = element.text().collect::<String>();
+            if let Some(vars) = parse_js_and_extract_vars(&script_text) {
+                if let Some(json_val) = vars.get(var_name) {
+                    return apply_json_path(json_val.clone(), expand_array, &json_path);
+                }
+            }
+        }
+        return None;
+    }
+
+    // Get first matching element for attribute extraction
     let element = document.select(&sel).next()?;
 
     // Get the raw value (attribute or text)
@@ -603,65 +633,96 @@ pub fn extract_path(html: &str, path: &str) -> Option<serde_json::Value> {
     // Parse as JSON
     let json_val: serde_json::Value = serde_json::from_str(&raw_value).ok()?;
 
+    apply_json_path(json_val, expand_array, &json_path)
+}
+
+/// Apply JSON path and array expansion to a value
+fn apply_json_path(json_val: serde_json::Value, expand_array: bool, json_path: &[String]) -> Option<serde_json::Value> {
     // Handle array expansion
     if expand_array {
         let arr = json_val.as_array()?;
 
         if json_path.is_empty() {
-            // Return the whole array
             return Some(serde_json::Value::Array(arr.clone()));
         }
 
         // Extract field from each element
         let extracted: Vec<serde_json::Value> = arr
             .iter()
-            .filter_map(|item| navigate_json(&item, &json_path))
+            .filter_map(|item| navigate_json(item, json_path))
             .collect();
 
         return Some(serde_json::Value::Array(extracted));
     }
 
     // Navigate JSON path without array expansion
-    navigate_json(&json_val, &json_path)
+    if json_path.is_empty() {
+        Some(json_val)
+    } else {
+        navigate_json(&json_val, json_path)
+    }
 }
 
 /// Parse the unified path syntax
 /// Returns: (css_selector, attr_name, expand_array, json_path_parts)
+///
+/// Handles:
+/// - `attr` -> attr_name="attr", json_path=[]
+/// - `attr.foo.bar` -> attr_name="attr", json_path=["foo", "bar"]
+/// - `attr[0]` -> attr_name="attr", json_path=["0"]
+/// - `attr[0].foo` -> attr_name="attr", json_path=["0", "foo"]
+/// - `attr[*]` -> attr_name="attr", expand_array=true, json_path=[]
+/// - `attr[*].id` -> attr_name="attr", expand_array=true, json_path=["id"]
+/// - `$var[0]` -> attr_name="$var", json_path=["0"]
 fn parse_path_syntax(path: &str) -> Option<(String, String, bool, Vec<String>)> {
-    let mut remaining = path.trim();
+    let remaining = path.trim();
 
     // Find @ for attribute (scan backwards to handle @ in CSS selectors)
     let at_pos = remaining.rfind('@')?;
 
     let css_selector = remaining[..at_pos].trim().to_string();
-    remaining = &remaining[at_pos + 1..];
+    let after_at = &remaining[at_pos + 1..];
 
-    // Check for [*] array expansion
-    let expand_array;
-    let after_bracket;
-    if let Some(bracket_pos) = remaining.find("[*]") {
-        expand_array = true;
-        let attr_part = &remaining[..bracket_pos];
-        after_bracket = &remaining[bracket_pos + 3..];
-        remaining = attr_part;
+    // Parse the part after @: attr_name[index].path or attr_name[*].path
+    let mut json_path = Vec::new();
+    let mut expand_array = false;
 
-        // Get JSON path after [*]
-        let json_path = if after_bracket.starts_with('.') {
-            after_bracket[1..].split('.').map(|s| s.to_string()).collect()
-        } else {
-            Vec::new()
-        };
+    // Find the attr_name (up to first [ or .)
+    let attr_end = after_at.find(|c| c == '[' || c == '.').unwrap_or(after_at.len());
+    let attr_name = after_at[..attr_end].to_string();
 
-        let attr_name = remaining.split('.').next()?.to_string();
-        return Some((css_selector, attr_name, expand_array, json_path));
-    } else {
-        expand_array = false;
+    if attr_name.is_empty() {
+        return None;
     }
 
-    // Parse attr.json.path
-    let parts: Vec<&str> = remaining.split('.').collect();
-    let attr_name = parts[0].to_string();
-    let json_path: Vec<String> = parts[1..].iter().map(|s| s.to_string()).collect();
+    // Parse remaining path after attr_name
+    let mut rest = &after_at[attr_end..];
+
+    while !rest.is_empty() {
+        if rest.starts_with("[*]") {
+            expand_array = true;
+            rest = &rest[3..];
+        } else if rest.starts_with('[') {
+            // Parse [N] index
+            if let Some(end_bracket) = rest.find(']') {
+                let idx_str = &rest[1..end_bracket];
+                json_path.push(idx_str.to_string());
+                rest = &rest[end_bracket + 1..];
+            } else {
+                break;
+            }
+        } else if rest.starts_with('.') {
+            // Parse .field
+            rest = &rest[1..];
+            let field_end = rest.find(|c| c == '[' || c == '.').unwrap_or(rest.len());
+            if field_end > 0 {
+                json_path.push(rest[..field_end].to_string());
+                rest = &rest[field_end..];
+            }
+        } else {
+            break;
+        }
+    }
 
     Some((css_selector, attr_name, expand_array, json_path))
 }
