@@ -17,12 +17,13 @@
 
 ## In Progress
 
-- [ ] SET crawler_* settings (user_agent, default_delay, respect_robots, timeout)
-- [ ] DuckDB http_proxy, http_timeout integration
-- [ ] CREATE SECRET integration for authenticated crawling
 - [ ] WHEN NOT MATCHED BY SOURCE clause in STREAM INTO MERGE
 
 ## Implemented Features
+
+- [x] SET crawler_* settings (user_agent, default_delay, respect_robots, timeout_ms, max_response_bytes)
+- [x] DuckDB http_proxy settings integration
+- [x] CREATE SECRET integration (bearer_token, extra_http_headers)
 
 - [x] F2: Connection pooling (libcurl handle pool)
 - [x] F3: Batch inserts
