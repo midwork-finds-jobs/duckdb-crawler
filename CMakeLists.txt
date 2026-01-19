@@ -25,6 +25,51 @@ if(ENABLE_RUST_PARSER)
             set(RUST_BUILD_FLAG "--release")
         endif()
 
+        # Detect Rust target based on platform (following yardstick pattern)
+        set(RUST_TARGET "")
+        if("${OS_NAME}" STREQUAL "linux")
+            if ("${OS_ARCH}" STREQUAL "arm64")
+                set(RUST_TARGET "aarch64-unknown-linux-gnu")
+            elseif("${CMAKE_CXX_COMPILER}" MATCHES "aarch64")
+                set(RUST_TARGET "aarch64-unknown-linux-gnu")
+            elseif("${CMAKE_CXX_COMPILER}" MATCHES "musl")
+                set(RUST_TARGET "x86_64-unknown-linux-musl")
+            else()
+                set(RUST_TARGET "x86_64-unknown-linux-gnu")
+            endif()
+        elseif("${OS_NAME}" STREQUAL "osx" OR APPLE)
+            if ("${OSX_BUILD_ARCH}" STREQUAL "arm64")
+                set(RUST_TARGET "aarch64-apple-darwin")
+            elseif ("${OSX_BUILD_ARCH}" STREQUAL "x86_64")
+                set(RUST_TARGET "x86_64-apple-darwin")
+            elseif ("${OS_ARCH}" STREQUAL "arm64")
+                set(RUST_TARGET "aarch64-apple-darwin")
+            elseif ("${OS_ARCH}" STREQUAL "amd64")
+                set(RUST_TARGET "x86_64-apple-darwin")
+            elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
+                set(RUST_TARGET "aarch64-apple-darwin")
+            else()
+                set(RUST_TARGET "x86_64-apple-darwin")
+            endif()
+        elseif(WIN32)
+            if ("${OS_ARCH}" STREQUAL "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "ARM64")
+                set(RUST_TARGET "aarch64-pc-windows-msvc")
+            else()
+                set(RUST_TARGET "x86_64-pc-windows-msvc")
+            endif()
+        endif()
+
+        # Set target flag if detected
+        if(NOT "${RUST_TARGET}" STREQUAL "")
+            set(RUST_TARGET_FLAG "--target=${RUST_TARGET}")
+            set(RUST_TARGET_DIR "${RUST_TARGET}/")
+            message(STATUS "Rust target: ${RUST_TARGET}")
+        else()
+            set(RUST_TARGET_FLAG "")
+            set(RUST_TARGET_DIR "")
+            message(STATUS "Rust target: default")
+        endif()
+
         # Platform-specific library name
         if(WIN32)
             set(RUST_LIB_NAME "rust_parser.lib")
@@ -33,12 +78,12 @@ if(ENABLE_RUST_PARSER)
         endif()
 
         set(RUST_PARSER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/rust_parser)
-        set(RUST_LIB_PATH ${RUST_PARSER_DIR}/target/${RUST_BUILD_TYPE}/${RUST_LIB_NAME})
+        set(RUST_LIB_PATH ${RUST_PARSER_DIR}/target/${RUST_TARGET_DIR}${RUST_BUILD_TYPE}/${RUST_LIB_NAME})
 
         # Custom command to build Rust library
         add_custom_command(
             OUTPUT ${RUST_LIB_PATH}
-            COMMAND ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG}
+            COMMAND ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG}
             WORKING_DIRECTORY ${RUST_PARSER_DIR}
             COMMENT "Building Rust HTML parser..."
             DEPENDS
@@ -117,6 +162,9 @@ if(RUST_PARSER_AVAILABLE)
     if(APPLE)
         target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework CoreFoundation" "-framework SystemConfiguration")
         target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework CoreFoundation" "-framework SystemConfiguration")
+    elseif(WIN32)
+        target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
     elseif(UNIX)
         target_link_libraries(${EXTENSION_NAME} dl pthread m)
         target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread m)

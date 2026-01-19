@@ -9,6 +9,11 @@
 #include <vector>
 #include <cctype>
 
+// Platform-specific timegm implementation
+#ifdef _WIN32
+#define timegm _mkgmtime
+#endif
+
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
