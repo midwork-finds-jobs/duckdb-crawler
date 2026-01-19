@@ -99,7 +99,7 @@ CREATE TABLE test_conditional (url VARCHAR, value INTEGER, updated_at TIMESTAMP)
 statement ok
 INSERT INTO test_conditional VALUES
     ('https://example.com/stale', 10, TIMESTAMP '2024-01-01 00:00:00'),
-    ('https://example.com/fresh', 20, TIMESTAMP '2026-01-17 00:00:00');
+    ('https://example.com/fresh', 20, current_timestamp);
 
 statement ok
 CRAWLING MERGE INTO test_conditional
