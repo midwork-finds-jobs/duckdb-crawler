@@ -45,9 +45,10 @@ if(ENABLE_RUST_PARSER)
                 if(NOT MUSL_TARGET_FOUND EQUAL -1)
                     set(RUST_TARGET "x86_64-unknown-linux-musl")
                 else()
-                    # Fallback to gnu target for musl builds
-                    set(RUST_TARGET "x86_64-unknown-linux-gnu")
-                    message(STATUS "musl Rust target not installed, using gnu target")
+                    # Cannot mix musl C and glibc Rust - disable Rust parser
+                    set(RUST_PARSER_AVAILABLE OFF)
+                    set(CARGO_EXECUTABLE "")
+                    message(STATUS "musl Rust target not installed, disabling Rust parser")
                 endif()
             else()
                 set(RUST_TARGET "x86_64-unknown-linux-gnu")
