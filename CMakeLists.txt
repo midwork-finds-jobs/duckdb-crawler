@@ -25,6 +25,13 @@ if(ENABLE_RUST_PARSER)
             set(RUST_BUILD_FLAG "--release")
         endif()
 
+        # Get installed Rust targets
+        execute_process(
+            COMMAND rustup target list --installed
+            OUTPUT_VARIABLE RUST_TARGETS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+
         # Detect Rust target based on platform (following yardstick pattern)
         set(RUST_TARGET "")
         if("${OS_NAME}" STREQUAL "linux")
@@ -33,7 +40,15 @@ if(ENABLE_RUST_PARSER)
             elseif("${CMAKE_CXX_COMPILER}" MATCHES "aarch64")
                 set(RUST_TARGET "aarch64-unknown-linux-gnu")
             elseif("${CMAKE_CXX_COMPILER}" MATCHES "musl")
-                set(RUST_TARGET "x86_64-unknown-linux-musl")
+                # Check if musl target is installed
+                string(FIND "${RUST_TARGETS}" "x86_64-unknown-linux-musl" MUSL_TARGET_FOUND)
+                if(NOT MUSL_TARGET_FOUND EQUAL -1)
+                    set(RUST_TARGET "x86_64-unknown-linux-musl")
+                else()
+                    # Fallback to gnu target for musl builds
+                    set(RUST_TARGET "x86_64-unknown-linux-gnu")
+                    message(STATUS "musl Rust target not installed, using gnu target")
+                endif()
             else()
                 set(RUST_TARGET "x86_64-unknown-linux-gnu")
             endif()
