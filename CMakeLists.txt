@@ -153,6 +153,7 @@ set(EXTENSION_SOURCES
     src/crawl_lateral_function.cpp
     src/stream_merge_function.cpp
     src/sitemap_function.cpp
+    src/importhtml_function.cpp
     src/thread_utils.cpp
     src/robots_parser.cpp
     src/crawl_parser.cpp

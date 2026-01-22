@@ -47,6 +47,10 @@ extern "C" {
     // Unified path extraction: css@attr[*].json.path
     ExtractionResultFFI extract_path_ffi(const char *html_ptr, size_t html_len,
                                           const char *path);
+    // HTML table extraction (url is used to detect Wikipedia for special handling)
+    // table_index: 0-based index of which matching element to extract
+    ExtractionResultFFI extract_table_ffi(const char *html_ptr, size_t html_len,
+                                           const char *selector, const char *url, size_t table_index);
 }
 
 namespace duckdb {
@@ -247,6 +251,22 @@ std::string ExtractPathWithRust(const std::string &html, const std::string &path
     return rust_result.GetJson();
 }
 
+std::string ExtractTableWithRust(const std::string &html, const std::string &selector, const std::string &url, size_t table_index) {
+    if (html.empty() || selector.empty()) {
+        return "{\"headers\":[],\"rows\":[],\"num_columns\":0,\"num_rows\":0,\"error\":\"Empty input\"}";
+    }
+
+    auto ffi_result = extract_table_ffi(html.c_str(), html.length(), selector.c_str(), url.c_str(), table_index);
+    RustResult rust_result(ffi_result);
+
+    if (rust_result.HasError()) {
+        return "{\"headers\":[],\"rows\":[],\"num_columns\":0,\"num_rows\":0,\"error\":\"" +
+               rust_result.GetError() + "\"}";
+    }
+
+    return rust_result.GetJson();
+}
+
 } // namespace duckdb
 
 #else // RUST_PARSER_AVAILABLE not defined
@@ -341,6 +361,14 @@ std::string ExtractPathWithRust(const std::string &html, const std::string &path
     (void)html;
     (void)path;
     return "null";
+}
+
+std::string ExtractTableWithRust(const std::string &html, const std::string &selector, const std::string &url, size_t table_index) {
+    (void)html;
+    (void)selector;
+    (void)url;
+    (void)table_index;
+    return "{\"headers\":[],\"rows\":[],\"num_columns\":0,\"num_rows\":0,\"error\":\"Rust parser not available\"}";
 }
 
 } // namespace duckdb

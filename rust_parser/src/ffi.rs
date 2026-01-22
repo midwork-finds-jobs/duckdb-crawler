@@ -505,6 +505,64 @@ pub unsafe extern "C" fn extract_path_ffi(
 }
 
 // ============================================================================
+// HTML Table Extraction
+// ============================================================================
+
+/// Extract HTML table using CSS selector
+/// Returns JSON: {"headers": [...], "rows": [[...], ...], "num_columns": N, "num_rows": M}
+/// url_ptr is used to detect Wikipedia pages for special handling
+/// table_index: 0-based index of which matching element to extract (0 = first)
+#[no_mangle]
+pub unsafe extern "C" fn extract_table_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+    selector_ptr: *const c_char,
+    url_ptr: *const c_char,
+    table_index: usize,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let selector = match CStr::from_ptr(selector_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid selector: {}", e)),
+            };
+        }
+    };
+
+    let url = match CStr::from_ptr(url_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => "",
+    };
+
+    // Detect Wikipedia pages for special handling
+    let is_wikipedia = url.contains("wikipedia.org");
+
+    let result = crate::extractors::extract_table(html, selector, is_wikipedia, table_index);
+
+    match serde_json::to_string(&result) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
+    }
+}
+
+// ============================================================================
 // Batch Crawl + Extract (HTTP in Rust)
 // ============================================================================
 

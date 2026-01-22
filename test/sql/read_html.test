@@ -1,0 +1,18 @@
+# name: test/sql/read_html.test
+# description: Test read_html() table function
+# group: [crawler]
+
+require crawler
+
+# Test basic read_html from Wikipedia
+statement ok
+SELECT * FROM read_html('https://en.wikipedia.org/wiki/List_of_most_expensive_buildings', '#bodyContent table.wikitable.sortable') LIMIT 1;
+
+# Test that year column is inferred as BIGINT
+query I
+SELECT typeof(Completed_will_complete)
+FROM read_html('https://en.wikipedia.org/wiki/List_of_most_expensive_buildings', '#bodyContent table.wikitable.sortable')
+LIMIT 1;
+----
+BIGINT
+

@@ -7,6 +7,7 @@
 #include "crawl_table_function.hpp"
 #include "stream_merge_function.hpp"
 #include "sitemap_function.hpp"
+#include "importhtml_function.hpp"
 #include "rust_ffi.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
@@ -86,6 +87,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register sitemap() table function for sitemap parsing
 	RegisterSitemapFunction(loader);
+
+	// Register read_html() table function for extracting HTML tables
+	RegisterReadHtmlFunction(loader);
 
 	// Register stream_merge_internal() for STREAM INTO ... USING ... ON (merge) syntax
 	RegisterCrawlingMergeFunction(loader);

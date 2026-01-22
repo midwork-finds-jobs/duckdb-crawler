@@ -1047,6 +1047,229 @@ fn value_to_string(value: &Value, return_text: bool) -> Option<String> {
     }
 }
 
+/// HTML table extraction result
+#[derive(Debug, Clone, Serialize)]
+pub struct TableExtractionResult {
+    /// Column headers
+    pub headers: Vec<String>,
+    /// Row data (each row is a vector of cell values)
+    pub rows: Vec<Vec<String>>,
+    /// Number of columns
+    pub num_columns: usize,
+    /// Number of rows
+    pub num_rows: usize,
+    /// Error if extraction failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Extract an HTML table or list using CSS selector
+/// Returns headers and rows with cell text content
+/// Supports: table, ul, ol elements
+/// If is_wikipedia is true, removes citation references from cells
+/// table_index: 0 = first match (default), 1 = second match, etc.
+pub fn extract_table(html: &str, selector: &str, is_wikipedia: bool, table_index: usize) -> TableExtractionResult {
+    let document = Html::parse_document(html);
+
+    // Parse selector
+    let elem_sel = match Selector::parse(selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return TableExtractionResult {
+                headers: vec![],
+                rows: vec![],
+                num_columns: 0,
+                num_rows: 0,
+                error: Some(format!("Invalid CSS selector: {:?}", e)),
+            };
+        }
+    };
+
+    // Find the element at the specified index
+    let element = match document.select(&elem_sel).nth(table_index) {
+        Some(t) => t,
+        None => {
+            let total = document.select(&elem_sel).count();
+            return TableExtractionResult {
+                headers: vec![],
+                rows: vec![],
+                num_columns: 0,
+                num_rows: 0,
+                error: Some(format!(
+                    "No element found at index {} (found {} matching '{}')",
+                    table_index, total, selector
+                )),
+            };
+        }
+    };
+
+    // Check element type to determine extraction strategy
+    let tag_name = element.value().name();
+
+    // Handle list elements (ul, ol)
+    if tag_name == "ul" || tag_name == "ol" {
+        return extract_list_as_table(element, is_wikipedia);
+    }
+
+    // Handle table elements
+    extract_table_element(element, is_wikipedia)
+}
+
+/// Extract a list (ul/ol) as a single-column table
+fn extract_list_as_table(list: scraper::ElementRef, is_wikipedia: bool) -> TableExtractionResult {
+    let li_sel = Selector::parse("li").unwrap();
+
+    let rows: Vec<Vec<String>> = list.select(&li_sel)
+        .map(|li| vec![extract_cell_text(li, is_wikipedia)])
+        .collect();
+
+    let num_rows = rows.len();
+
+    TableExtractionResult {
+        headers: vec!["item".to_string()],
+        rows,
+        num_columns: 1,
+        num_rows,
+        error: None,
+    }
+}
+
+/// Extract a table element
+fn extract_table_element(table: scraper::ElementRef, is_wikipedia: bool) -> TableExtractionResult {
+    // Try to extract headers from thead > tr > th, or first tr > th
+    let mut headers: Vec<String> = Vec::new();
+
+    // Try thead first
+    if let Ok(thead_sel) = Selector::parse("thead tr th") {
+        headers = table.select(&thead_sel)
+            .map(|th| extract_cell_text(th, is_wikipedia))
+            .collect();
+    }
+
+    // If no headers in thead, try first row th elements
+    if headers.is_empty() {
+        if let Ok(th_sel) = Selector::parse("tr th") {
+            headers = table.select(&th_sel)
+                .take_while(|_| true) // Take all th from first row context
+                .map(|th| extract_cell_text(th, is_wikipedia))
+                .collect();
+        }
+    }
+
+    // If still no headers, try first row td elements as headers
+    if headers.is_empty() {
+        if let Ok(first_row_sel) = Selector::parse("tr:first-child td") {
+            headers = table.select(&first_row_sel)
+                .map(|td| extract_cell_text(td, is_wikipedia))
+                .collect();
+        }
+    }
+
+    // Extract data rows - try tbody tr first, then just tr
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let row_selector = Selector::parse("tbody tr").ok()
+        .or_else(|| Selector::parse("tr").ok());
+
+    if let Some(row_sel) = row_selector {
+        let td_sel = Selector::parse("td").unwrap();
+        let th_sel = Selector::parse("th").unwrap();
+
+        for row in table.select(&row_sel) {
+            // Check if this is a header row (all th, no td)
+            let tds: Vec<_> = row.select(&td_sel).collect();
+            let ths: Vec<_> = row.select(&th_sel).collect();
+
+            // Skip pure header rows (they're already captured above)
+            if tds.is_empty() && !ths.is_empty() {
+                continue;
+            }
+
+            // Extract cell values (prefer td, fall back to th)
+            let cells: Vec<String> = if !tds.is_empty() {
+                tds.iter()
+                    .map(|td| extract_cell_text(*td, is_wikipedia))
+                    .collect()
+            } else {
+                ths.iter()
+                    .map(|th| extract_cell_text(*th, is_wikipedia))
+                    .collect()
+            };
+
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+        }
+    }
+
+    // Determine column count
+    let num_columns = headers.len().max(rows.first().map(|r| r.len()).unwrap_or(0));
+
+    // If headers is empty but we have rows, generate column names
+    if headers.is_empty() && num_columns > 0 {
+        headers = (0..num_columns).map(|i| format!("column{}", i + 1)).collect();
+    }
+
+    // Pad headers if needed
+    while headers.len() < num_columns {
+        headers.push(format!("column{}", headers.len() + 1));
+    }
+
+    let num_rows = rows.len();
+
+    TableExtractionResult {
+        headers,
+        rows,
+        num_columns,
+        num_rows,
+        error: None,
+    }
+}
+
+/// Normalize cell text: trim whitespace, collapse multiple spaces/newlines
+fn normalize_cell_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Extract text from a cell element, optionally applying Wikipedia-specific cleanup
+fn extract_cell_text(element: scraper::ElementRef, is_wikipedia: bool) -> String {
+    if is_wikipedia {
+        // For Wikipedia: skip citation references (sup elements with cite_ref ids or reference class)
+        let mut text_parts: Vec<String> = Vec::new();
+        extract_text_excluding_citations(element, &mut text_parts);
+        normalize_cell_text(&text_parts.join(""))
+    } else {
+        let text = element.text().collect::<String>();
+        normalize_cell_text(&text)
+    }
+}
+
+/// Recursively extract text from an element, excluding Wikipedia citation elements
+fn extract_text_excluding_citations(element: scraper::ElementRef, parts: &mut Vec<String>) {
+    for child in element.children() {
+        match child.value() {
+            scraper::node::Node::Text(text) => {
+                parts.push(text.to_string());
+            }
+            scraper::node::Node::Element(el) => {
+                // Skip sup elements that are citation references
+                if el.name() == "sup" {
+                    // Check for cite_ref id or reference class
+                    let id = el.attr("id").unwrap_or("");
+                    let class = el.attr("class").unwrap_or("");
+                    if id.starts_with("cite_ref") || class.contains("reference") {
+                        continue; // Skip this element entirely
+                    }
+                }
+                // Recursively process other elements
+                if let Some(child_ref) = scraper::ElementRef::wrap(child) {
+                    extract_text_excluding_citations(child_ref, parts);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Extract links from HTML using a CSS selector
 /// Returns a list of absolute URLs
 pub fn extract_links(html: &str, selector: &str, base_url: &str) -> Vec<String> {
@@ -1450,4 +1673,75 @@ fn test_extract_links() {
     assert!(!links.iter().any(|l| l.contains("javascript:")));
     assert!(!links.iter().any(|l| l.contains("mailto:")));
     assert!(!links.iter().any(|l| l.contains("#anchor")));
+}
+
+#[test]
+fn test_extract_table_basic() {
+    let html = r#"
+    <html>
+    <body>
+        <table id="data">
+            <thead>
+                <tr><th>Name</th><th>Value</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>Item 1</td><td>100</td></tr>
+                <tr><td>Item 2</td><td>200</td></tr>
+            </tbody>
+        </table>
+    </body>
+    </html>
+    "#;
+
+    let result = extract_table(html, "table#data", false);
+
+    assert!(result.error.is_none());
+    assert_eq!(result.headers, vec!["Name", "Value"]);
+    assert_eq!(result.num_columns, 2);
+    assert_eq!(result.num_rows, 2);
+    assert_eq!(result.rows[0], vec!["Item 1", "100"]);
+    assert_eq!(result.rows[1], vec!["Item 2", "200"]);
+}
+
+#[test]
+fn test_extract_table_wikipedia_citations_removed() {
+    // Simulate Wikipedia HTML with citation references
+    let html = r##"
+    <html>
+    <body>
+        <table class="wikitable">
+            <thead>
+                <tr><th>Building</th><th>Cost</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Some Building<sup id="cite_ref-1" class="reference"><a href="#cite_note-1">[1]</a></sup></td>
+                    <td>4.06<sup id="cite_ref-15" class="reference"><a href="#cite_note-15"><span class="cite-bracket">[</span>15<span class="cite-bracket">]</span></a></sup><sup id="cite_ref-16" class="reference"><a href="#cite_note-16"><span class="cite-bracket">[</span>16<span class="cite-bracket">]</span></a></sup></td>
+                </tr>
+                <tr>
+                    <td>Another Building</td>
+                    <td>10.5<sup class="reference"><a href="#cite_note-20">[20]</a></sup></td>
+                </tr>
+            </tbody>
+        </table>
+    </body>
+    </html>
+    "##;
+
+    // Test WITH Wikipedia mode (citations should be removed)
+    let result_wiki = extract_table(html, "table.wikitable", true);
+
+    assert!(result_wiki.error.is_none());
+    assert_eq!(result_wiki.headers, vec!["Building", "Cost"]);
+    assert_eq!(result_wiki.rows[0][0], "Some Building");
+    assert_eq!(result_wiki.rows[0][1], "4.06");  // No citation numbers!
+    assert_eq!(result_wiki.rows[1][0], "Another Building");
+    assert_eq!(result_wiki.rows[1][1], "10.5");  // No citation numbers!
+
+    // Test WITHOUT Wikipedia mode (citations should be preserved in text)
+    let result_normal = extract_table(html, "table.wikitable", false);
+
+    assert!(result_normal.error.is_none());
+    // Normal mode includes the citation text
+    assert!(result_normal.rows[0][1].contains("[15]") || result_normal.rows[0][1].contains("15"));
 }

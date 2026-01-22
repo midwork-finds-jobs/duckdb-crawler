@@ -61,4 +61,10 @@ std::string ExtractElementWithRust(const std::string &html, const std::string &s
 //   input#jobs@value[*].id   -> array of 'id' fields
 std::string ExtractPathWithRust(const std::string &html, const std::string &path);
 
+// Extract HTML table using CSS selector
+// Returns JSON: {"headers": [...], "rows": [[...], ...], "num_columns": N, "num_rows": M, "error": null}
+// url is used to detect Wikipedia pages for special handling (removes citation references)
+// table_index is 0-based index of which matching table to extract
+std::string ExtractTableWithRust(const std::string &html, const std::string &selector, const std::string &url, size_t table_index);
+
 } // namespace duckdb
