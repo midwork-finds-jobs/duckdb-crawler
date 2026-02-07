@@ -20,7 +20,12 @@ std::string ExtractJsonLdWithRust(const std::string &html);
 std::string ExtractMicrodataWithRust(const std::string &html);
 std::string ExtractOpenGraphWithRust(const std::string &html);
 std::string ExtractJsWithRust(const std::string &html);
+std::string ExtractMetaWithRust(const std::string &html);
 std::string ExtractCssWithRust(const std::string &html, const std::string &selector);
+
+// Token-efficient page inventory for LLM agents
+// Returns compact JSON: {meta, og, readability, schema, js, links, tables}
+std::string PageInfoWithRust(const std::string &html, const std::string &url);
 
 // Extract article content using readability algorithm
 // Returns JSON: {"title": "...", "content": "<html>", "text_content": "...", "length": 123, "excerpt": "..."}

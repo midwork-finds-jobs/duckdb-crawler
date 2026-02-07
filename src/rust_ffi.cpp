@@ -21,11 +21,15 @@ extern "C" {
     ExtractionResultFFI extract_microdata_ffi(const char *html_ptr, size_t html_len);
     ExtractionResultFFI extract_opengraph_ffi(const char *html_ptr, size_t html_len);
     ExtractionResultFFI extract_js_ffi(const char *html_ptr, size_t html_len);
+    ExtractionResultFFI extract_meta_ffi(const char *html_ptr, size_t html_len);
     ExtractionResultFFI extract_css_ffi(const char *html_ptr, size_t html_len,
                                          const char *selector);
     // Readability extraction
     ExtractionResultFFI extract_readability_ffi(const char *html_ptr, size_t html_len,
                                                  const char *url);
+    // Token-efficient page inventory
+    ExtractionResultFFI page_info_ffi(const char *html_ptr, size_t html_len,
+                                       const char *url);
     // Batch crawl + extract (HTTP in Rust)
     ExtractionResultFFI crawl_batch_ffi(const char *request_json);
     // Sitemap fetching (simple API - returns char* directly)
@@ -129,11 +133,25 @@ std::string ExtractJsWithRust(const std::string &html) {
     return result.HasError() ? "{}" : result.GetJson();
 }
 
+std::string ExtractMetaWithRust(const std::string &html) {
+    if (html.empty()) return "{}";
+    auto ffi_result = extract_meta_ffi(html.c_str(), html.length());
+    RustResult result(ffi_result);
+    return result.HasError() ? "{}" : result.GetJson();
+}
+
 std::string ExtractCssWithRust(const std::string &html, const std::string &selector) {
     if (html.empty() || selector.empty()) return "[]";
     auto ffi_result = extract_css_ffi(html.c_str(), html.length(), selector.c_str());
     RustResult result(ffi_result);
     return result.HasError() ? "[]" : result.GetJson();
+}
+
+std::string PageInfoWithRust(const std::string &html, const std::string &url) {
+    if (html.empty()) return "{}";
+    auto ffi_result = page_info_ffi(html.c_str(), html.length(), url.c_str());
+    RustResult result(ffi_result);
+    return result.HasError() ? "{}" : result.GetJson();
 }
 
 std::string ExtractReadabilityWithRust(const std::string &html, const std::string &url) {
@@ -307,10 +325,21 @@ std::string ExtractJsWithRust(const std::string &html) {
     return "{}";
 }
 
+std::string ExtractMetaWithRust(const std::string &html) {
+    (void)html;
+    return "{}";
+}
+
 std::string ExtractCssWithRust(const std::string &html, const std::string &selector) {
     (void)html;
     (void)selector;
     return "[]";
+}
+
+std::string PageInfoWithRust(const std::string &html, const std::string &url) {
+    (void)html;
+    (void)url;
+    return "{}";
 }
 
 std::string ExtractReadabilityWithRust(const std::string &html, const std::string &url) {

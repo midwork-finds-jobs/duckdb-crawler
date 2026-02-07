@@ -1,0 +1,155 @@
+# name: test/sql/page_info.test
+# description: Test page_info(), html.meta, and final_url features
+# group: [crawler]
+
+require crawler
+
+# Test page_info() returns JSON with expected keys
+query I
+SELECT json_array_length(json_keys(page_info(
+    '<html><head><meta name="description" content="Test"></head><body><h1>Hello</h1><p>Text</p></body></html>',
+    'http://example.com'
+)));
+----
+7
+
+# Test page_info() meta extraction
+query I
+SELECT page_info(
+    '<html><head><meta name="description" content="A test page"><meta name="robots" content="noindex"></head><body>Text</body></html>',
+    'http://example.com'
+)->'meta'->>'description';
+----
+A test page
+
+# Test page_info() meta robots
+query I
+SELECT page_info(
+    '<html><head><meta name="robots" content="noindex,nofollow"></head><body>Text</body></html>',
+    'http://example.com'
+)->'meta'->>'robots';
+----
+noindex,nofollow
+
+# Test page_info() OpenGraph extraction
+query I
+SELECT page_info(
+    '<html><head><meta property="og:title" content="OG Title"><meta property="og:type" content="website"></head><body>Text</body></html>',
+    'http://example.com'
+)->'og'->>'title';
+----
+OG Title
+
+# Test page_info() JS variable inventory
+query I
+SELECT page_info(
+    '<html><body><script>var jobs = [{id: 1, title: "Engineer"}];</script></body></html>',
+    'http://example.com'
+)->'js'->0->>'name';
+----
+jobs
+
+# Test page_info() JS variable type detection
+query I
+SELECT page_info(
+    '<html><body><script>var jobs = [{id: 1}];</script></body></html>',
+    'http://example.com'
+)->'js'->0->>'type';
+----
+array
+
+# Test page_info() JS variable items count for arrays
+query I
+SELECT (page_info(
+    '<html><body><script>var items = [1, 2, 3];</script></body></html>',
+    'http://example.com'
+)->'js'->0->>'items')::INTEGER;
+----
+3
+
+# Test page_info() link count
+query I
+SELECT (page_info(
+    '<html><body><a href="/a">A</a><a href="/b">B</a><a href="/c">C</a></body></html>',
+    'http://example.com'
+)->>'links')::INTEGER;
+----
+3
+
+# Test page_info() table count
+query I
+SELECT (page_info(
+    '<html><body><table><tr><td>1</td></tr></table><table><tr><td>2</td></tr></table></body></html>',
+    'http://example.com'
+)->>'tables')::INTEGER;
+----
+2
+
+# Test page_info() readability has title key
+query I
+SELECT page_info(
+    '<html><body><article><p>Hello world</p></article></body></html>',
+    'http://example.com'
+)->'readability'->>'title' IS NOT NULL;
+----
+true
+
+# Test page_info() schema detection (JSON-LD)
+query I
+SELECT json_array_length(page_info(
+    '<html><head><script type="application/ld+json">{"@type":"Product","name":"Widget"}</script></head><body>Text</body></html>',
+    'http://example.com'
+)->'schema');
+----
+1
+
+# Test page_info() schema type name
+query I
+SELECT page_info(
+    '<html><head><script type="application/ld+json">{"@type":"Product","name":"Widget"}</script></head><body>Text</body></html>',
+    'http://example.com'
+)->'schema'->0->>'type';
+----
+Product
+
+# Test page_info() empty HTML
+query I
+SELECT page_info('', 'http://example.com')::VARCHAR;
+----
+{}
+
+# Test page_info() with meta viewport
+query I
+SELECT page_info(
+    '<html><head><meta name="viewport" content="width=device-width"></head><body>x</body></html>',
+    'http://example.com'
+)->'meta'->>'viewport';
+----
+width=device-width
+
+# Test page_info() with multiple schema types
+query I
+SELECT json_array_length(page_info(
+    '<html><head><script type="application/ld+json">{"@type":"Product","name":"Widget"}</script><script type="application/ld+json">{"@type":"BreadcrumbList","itemListElement":[]}</script></head><body>Text</body></html>',
+    'http://example.com'
+)->'schema');
+----
+2
+
+# Test page_info() JS variable size is present
+query I
+SELECT (page_info(
+    '<html><body><script>var config = {key: "value", nested: {a: 1}};</script></body></html>',
+    'http://example.com'
+)->'js'->0->>'size')::INTEGER > 0;
+----
+true
+
+# Test page_info() no JS vars returns empty array
+query I
+SELECT json_array_length(page_info(
+    '<html><body><p>No scripts here</p></body></html>',
+    'http://example.com'
+)->'js');
+----
+0

@@ -255,6 +255,78 @@ pub unsafe extern "C" fn extract_js_ffi(
     }
 }
 
+/// Extract meta tags from HTML
+#[no_mangle]
+pub unsafe extern "C" fn extract_meta_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let document = scraper::Html::parse_document(html);
+    let meta = crate::extractors::extract_meta_tags(&document);
+
+    match serde_json::to_string(&meta) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
+    }
+}
+
+/// Token-efficient page inventory for LLM agents
+#[no_mangle]
+pub unsafe extern "C" fn page_info_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+    url_ptr: *const c_char,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let url = match CStr::from_ptr(url_ptr).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid URL: {}", e)),
+            };
+        }
+    };
+
+    let result = crate::extractors::page_info(html, url);
+
+    match serde_json::to_string(&result) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
+    }
+}
+
 /// Extract article content using readability algorithm
 #[no_mangle]
 pub unsafe extern "C" fn extract_readability_ffi(
@@ -623,6 +695,7 @@ type DomainRateLimiter = Arc<Mutex<HashMap<String, std::time::Instant>>>;
 #[derive(Debug, serde::Serialize)]
 struct CrawlResult {
     url: String,
+    final_url: String,
     status: i32,
     content_type: String,
     body: String,
@@ -680,6 +753,7 @@ async fn fetch_and_extract(
     match client.get(&url).send().await {
         Ok(response) => {
             let status = response.status().as_u16() as i32;
+            let final_url = response.url().to_string();
             let content_type = response
                 .headers()
                 .get("content-type")
@@ -699,6 +773,7 @@ async fn fetch_and_extract(
 
                     CrawlResult {
                         url,
+                        final_url,
                         status,
                         content_type,
                         body,
@@ -708,7 +783,8 @@ async fn fetch_and_extract(
                     }
                 }
                 Err(e) => CrawlResult {
-                    url,
+                    url: url.clone(),
+                    final_url: url,
                     status,
                     content_type,
                     body: String::new(),
@@ -719,7 +795,8 @@ async fn fetch_and_extract(
             }
         }
         Err(e) => CrawlResult {
-            url,
+            url: url.clone(),
+            final_url: url,
             status: 0,
             content_type: String::new(),
             body: String::new(),

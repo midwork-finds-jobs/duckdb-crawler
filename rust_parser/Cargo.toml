@@ -29,5 +29,5 @@ quick-xml = "0.37"      # XML sitemap parser
 readability = "0.3"
 
 [profile.release]
-lto = true
+lto = "thin"
 codegen-units = 1
