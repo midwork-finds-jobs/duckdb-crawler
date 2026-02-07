@@ -434,7 +434,7 @@ fn extract_from_og(data: &HashMap<String, String>, path: &[String]) -> Option<St
 }
 
 /// Extract meta tags
-fn extract_meta_tags(document: &Html) -> HashMap<String, String> {
+pub fn extract_meta_tags(document: &Html) -> HashMap<String, String> {
     let mut result = HashMap::new();
     let selector = Selector::parse("meta[name]").unwrap();
 
@@ -1744,4 +1744,105 @@ fn test_extract_table_wikipedia_citations_removed() {
     assert!(result_normal.error.is_none());
     // Normal mode includes the citation text
     assert!(result_normal.rows[0][1].contains("[15]") || result_normal.rows[0][1].contains("15"));
+}
+
+/// Token-efficient page inventory for LLM agents.
+/// Returns compact JSON with meta, og, readability summary, schema types+sizes,
+/// JS variable names+types+sizes, link count, and table count.
+pub fn page_info(html: &str, url: &str) -> serde_json::Value {
+    use serde_json::json;
+
+    let document = scraper::Html::parse_document(html);
+
+    // Meta tags
+    let meta = extract_meta_tags(&document);
+
+    // OpenGraph
+    let og = extract_opengraph(&document);
+
+    // Readability summary (truncated excerpt)
+    let readability = extract_readability(html, url);
+    let excerpt = readability.excerpt.chars().take(150).collect::<String>();
+    let read_summary = json!({
+        "title": readability.title,
+        "length": readability.length,
+        "excerpt": excerpt
+    });
+
+    // Schema types with sizes (JSON-LD + microdata combined)
+    let jsonld = extract_jsonld_objects(&document);
+    let microdata = extract_microdata(&document);
+
+    let mut schema_summary: Vec<serde_json::Value> = Vec::new();
+    let mut all_schema: HashMap<String, Vec<&serde_json::Value>> = HashMap::new();
+
+    for (type_name, value) in &jsonld {
+        all_schema.entry(type_name.clone()).or_default().push(value);
+    }
+    for (type_name, value) in &microdata {
+        all_schema.entry(type_name.clone()).or_default().push(value);
+    }
+
+    for (type_name, values) in &all_schema {
+        let total_size: usize = values.iter()
+            .map(|v| serde_json::to_string(v).map(|s| s.len()).unwrap_or(0))
+            .sum();
+        let count = if values.len() == 1 {
+            // Check if the single value is an array
+            if let Some(arr) = values[0].as_array() {
+                arr.len()
+            } else {
+                1
+            }
+        } else {
+            values.len()
+        };
+        schema_summary.push(json!({
+            "type": type_name,
+            "count": count,
+            "size": total_size
+        }));
+    }
+
+    // JS variable inventory
+    let js_vars = extract_js_variables(&document);
+    let mut js_summary: Vec<serde_json::Value> = js_vars.iter().map(|(name, value)| {
+        let size = serde_json::to_string(value).map(|s| s.len()).unwrap_or(0);
+        let mut entry = json!({
+            "name": name,
+            "type": match value {
+                serde_json::Value::Array(_) => "array",
+                serde_json::Value::Object(_) => "object",
+                serde_json::Value::String(_) => "string",
+                serde_json::Value::Number(_) => "number",
+                serde_json::Value::Bool(_) => "bool",
+                serde_json::Value::Null => "null",
+            },
+            "size": size
+        });
+        if let Some(arr) = value.as_array() {
+            entry["items"] = json!(arr.len());
+        }
+        entry
+    }).collect();
+    // Sort by size descending
+    js_summary.sort_by(|a, b| {
+        let sa = a["size"].as_u64().unwrap_or(0);
+        let sb = b["size"].as_u64().unwrap_or(0);
+        sb.cmp(&sa)
+    });
+
+    // Counts
+    let links = document.select(&scraper::Selector::parse("a[href]").unwrap()).count();
+    let tables = document.select(&scraper::Selector::parse("table").unwrap()).count();
+
+    json!({
+        "meta": meta,
+        "og": og,
+        "readability": read_summary,
+        "schema": schema_summary,
+        "js": js_summary,
+        "links": links,
+        "tables": tables
+    })
 }

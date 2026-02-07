@@ -83,6 +83,7 @@ using namespace duckdb_yyjson;
 
 struct SingleCrawlResult {
     string url;
+    string final_url;
     int status_code = 0;
     string content_type;
     string body;
@@ -290,6 +291,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
 #if defined(RUST_PARSER_AVAILABLE) && RUST_PARSER_AVAILABLE
         string js_json = ExtractJsWithRust(body);
         string og_json = ExtractOpenGraphWithRust(body);
+        string meta_json = ExtractMetaWithRust(body);
         string jsonld_json = ExtractJsonLdWithRust(body);
         string microdata_json = ExtractMicrodataWithRust(body);
         string schema_json = CombineSchemaData(jsonld_json, microdata_json);
@@ -297,12 +299,14 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
 
         html_values.push_back(make_pair("document", Value(body)));
         html_values.push_back(make_pair("js", MakeJsonValue(js_json)));
+        html_values.push_back(make_pair("meta", MakeJsonValue(meta_json)));
         html_values.push_back(make_pair("opengraph", MakeJsonValue(og_json)));
         html_values.push_back(make_pair("schema", MakeSchemaMapValue(schema_json)));
         html_values.push_back(make_pair("readability", MakeJsonValue(readability_json)));
 #else
         html_values.push_back(make_pair("document", Value(body)));
         html_values.push_back(make_pair("js", Value(LogicalType::JSON())));
+        html_values.push_back(make_pair("meta", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("opengraph", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("schema", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
         html_values.push_back(make_pair("readability", Value(LogicalType::JSON())));
@@ -310,6 +314,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
     } else {
         html_values.push_back(make_pair("document", body.empty() ? Value() : Value(body)));
         html_values.push_back(make_pair("js", Value(LogicalType::JSON())));
+        html_values.push_back(make_pair("meta", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("opengraph", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("schema", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
         html_values.push_back(make_pair("readability", Value(LogicalType::JSON())));
@@ -458,6 +463,11 @@ static SingleCrawlResult CrawlSingleUrl(const string &url,
             result.body = yyjson_get_str(body_val);
         }
 
+        yyjson_val *final_url_val = yyjson_obj_get(item, "final_url");
+        if (final_url_val && yyjson_is_str(final_url_val)) {
+            result.final_url = yyjson_get_str(final_url_val);
+        }
+
         yyjson_val *err_val = yyjson_obj_get(item, "error");
         if (err_val && yyjson_is_str(err_val)) {
             result.error = yyjson_get_str(err_val);
@@ -526,15 +536,17 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
     return_types.push_back(LogicalType::INTEGER);  // status
     return_types.push_back(LogicalType::VARCHAR);  // content_type
 
-    // html STRUCT(document, js, opengraph, schema, readability) - structured HTML content
+    // html STRUCT(document, js, meta, opengraph, schema, readability) - structured HTML content
     child_list_t<LogicalType> html_struct;
     html_struct.push_back(make_pair("document", LogicalType::VARCHAR));
     html_struct.push_back(make_pair("js", LogicalType::JSON()));        // JSON type
+    html_struct.push_back(make_pair("meta", LogicalType::JSON()));      // Meta tags JSON
     html_struct.push_back(make_pair("opengraph", LogicalType::JSON())); // JSON type
     html_struct.push_back(make_pair("schema", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::JSON())));  // MAP for schema['Product'] access
     html_struct.push_back(make_pair("readability", LogicalType::JSON()));  // Readability extracted content
     return_types.push_back(LogicalType::STRUCT(html_struct));
 
+    return_types.push_back(LogicalType::VARCHAR);  // final_url
     return_types.push_back(LogicalType::VARCHAR);  // error
     return_types.push_back(LogicalType::VARCHAR);  // extract
     return_types.push_back(LogicalType::BIGINT);   // response_time_ms
@@ -543,6 +555,7 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
     names.push_back("status");
     names.push_back("content_type");
     names.push_back("html");
+    names.push_back("final_url");
     names.push_back("error");
     names.push_back("extract");
     names.push_back("response_time_ms");
@@ -624,9 +637,10 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
             output.SetValue(1, 0, Value());
             output.SetValue(2, 0, Value());
             output.SetValue(3, 0, BuildHtmlStructValue("", "", ""));
-            output.SetValue(4, 0, Value("NULL URL"));
-            output.SetValue(5, 0, Value());
+            output.SetValue(4, 0, Value());
+            output.SetValue(5, 0, Value("NULL URL"));
             output.SetValue(6, 0, Value());
+            output.SetValue(7, 0, Value());
             output.SetCardinality(1);
             local_state.current_row++;
             local_state.results_returned++;
@@ -685,9 +699,10 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
         output.SetValue(1, 0, Value(result.status_code));
         output.SetValue(2, 0, Value(result.content_type));
         output.SetValue(3, 0, BuildHtmlStructValue(result.body, result.content_type, result.url));
-        output.SetValue(4, 0, result.error.empty() ? Value() : Value(result.error));
-        output.SetValue(5, 0, result.extracted_json.empty() ? Value() : Value(result.extracted_json));
-        output.SetValue(6, 0, Value::BIGINT(result.response_time_ms));
+        output.SetValue(4, 0, result.final_url.empty() ? Value() : Value(result.final_url));
+        output.SetValue(5, 0, result.error.empty() ? Value() : Value(result.error));
+        output.SetValue(6, 0, result.extracted_json.empty() ? Value() : Value(result.extracted_json));
+        output.SetValue(7, 0, Value::BIGINT(result.response_time_ms));
         output.SetCardinality(1);
 
         local_state.current_row++;

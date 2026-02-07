@@ -188,72 +188,16 @@ static void CssSelectFunction3(DataChunk &args, ExpressionState &state, Vector &
         });
 }
 
-// Discover all structured data in HTML document
-static string DiscoverStructuredData(const string &html) {
-    if (html.empty()) {
-        return "{}";
-    }
-
-#if defined(RUST_PARSER_AVAILABLE) && RUST_PARSER_AVAILABLE
-    string jsonld = ExtractJsonLdWithRust(html);
-    string opengraph = ExtractOpenGraphWithRust(html);
-    string js_vars = ExtractJsWithRust(html);
-
-    yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
-    if (!doc) return "{}";
-
-    yyjson_mut_val *root = yyjson_mut_obj(doc);
-    yyjson_mut_doc_set_root(doc, root);
-
-    if (!jsonld.empty() && jsonld != "{}") {
-        yyjson_doc *jld_doc = yyjson_read(jsonld.c_str(), jsonld.size(), 0);
-        if (jld_doc) {
-            yyjson_mut_val *jld_copy = yyjson_val_mut_copy(doc, yyjson_doc_get_root(jld_doc));
-            yyjson_mut_obj_add_val(doc, root, "jsonld", jld_copy);
-            yyjson_doc_free(jld_doc);
-        }
-    }
-
-    if (!opengraph.empty() && opengraph != "{}") {
-        yyjson_doc *og_doc = yyjson_read(opengraph.c_str(), opengraph.size(), 0);
-        if (og_doc) {
-            yyjson_mut_val *og_copy = yyjson_val_mut_copy(doc, yyjson_doc_get_root(og_doc));
-            yyjson_mut_obj_add_val(doc, root, "opengraph", og_copy);
-            yyjson_doc_free(og_doc);
-        }
-    }
-
-    if (!js_vars.empty() && js_vars != "{}") {
-        yyjson_doc *js_doc = yyjson_read(js_vars.c_str(), js_vars.size(), 0);
-        if (js_doc) {
-            yyjson_mut_val *js_copy = yyjson_val_mut_copy(doc, yyjson_doc_get_root(js_doc));
-            yyjson_mut_obj_add_val(doc, root, "js_vars", js_copy);
-            yyjson_doc_free(js_doc);
-        }
-    }
-
-    size_t len = 0;
-    char *json_str = yyjson_mut_write(doc, YYJSON_WRITE_PRETTY, &len);
-    yyjson_mut_doc_free(doc);
-
-    if (!json_str) return "{}";
-
-    string result(json_str, len);
-    free(json_str);
-    return result;
-#else
-    return "{}";
-#endif
-}
-
-static void DiscoverFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// Token-efficient page inventory for LLM agents
+static void PageInfoFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     auto &html_vec = args.data[0];
+    auto &url_vec = args.data[1];
 
-    UnaryExecutor::Execute<string_t, string_t>(
-        html_vec, result, args.size(),
-        [&result](string_t html) {
-            string discovered = DiscoverStructuredData(html.GetString());
-            return StringVector::AddString(result, discovered);
+    BinaryExecutor::Execute<string_t, string_t, string_t>(
+        html_vec, url_vec, result, args.size(),
+        [&result](string_t html, string_t url) {
+            string info = PageInfoWithRust(html.GetString(), url.GetString());
+            return StringVector::AddString(result, info);
         });
 }
 
@@ -364,12 +308,12 @@ void RegisterCssExtractFunction(ExtensionLoader &loader) {
         CssSelectFunction3);
     loader.RegisterFunction(css_select_func);
 
-    // discover() function
-    ScalarFunction discover_func("discover",
-        {LogicalType::VARCHAR},
-        LogicalType::VARCHAR,
-        DiscoverFunction);
-    loader.RegisterFunction(discover_func);
+    // page_info(html, url) -> JSON - token-efficient page inventory
+    ScalarFunction page_info_func("page_info",
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},
+        LogicalType::JSON(),
+        PageInfoFunction);
+    loader.RegisterFunction(page_info_func);
 }
 
 } // namespace duckdb
