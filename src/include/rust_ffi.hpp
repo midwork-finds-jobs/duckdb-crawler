@@ -48,7 +48,7 @@ bool IsInterrupted();
 // Extract links from HTML using CSS selector
 // Returns vector of absolute URLs
 std::vector<std::string> ExtractLinksWithRust(const std::string &html, const std::string &selector,
-                                               const std::string &base_url);
+                                              const std::string &base_url);
 
 // Extract element as JSON with text, html, and attr map
 // Returns JSON: {"text": "...", "html": "...", "attr": {"key": "value", ...}}
@@ -65,6 +65,7 @@ std::string ExtractPathWithRust(const std::string &html, const std::string &path
 // Returns JSON: {"headers": [...], "rows": [[...], ...], "num_columns": N, "num_rows": M, "error": null}
 // url is used to detect Wikipedia pages for special handling (removes citation references)
 // table_index is 0-based index of which matching table to extract
-std::string ExtractTableWithRust(const std::string &html, const std::string &selector, const std::string &url, size_t table_index);
+std::string ExtractTableWithRust(const std::string &html, const std::string &selector, const std::string &url,
+                                 size_t table_index);
 
 } // namespace duckdb

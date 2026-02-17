@@ -14,8 +14,9 @@ void ThreadSafeUrlQueue::Push(UrlQueueEntry entry) {
 
 bool ThreadSafeUrlQueue::TryPop(UrlQueueEntry &entry) {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (queue_.empty()) return false;
-	entry = std::move(const_cast<UrlQueueEntry&>(queue_.top()));
+	if (queue_.empty())
+		return false;
+	entry = std::move(const_cast<UrlQueueEntry &>(queue_.top()));
 	queue_.pop();
 	return true;
 }
@@ -25,8 +26,9 @@ bool ThreadSafeUrlQueue::WaitAndPop(UrlQueueEntry &entry, std::chrono::milliseco
 	if (!cv_.wait_for(lock, timeout, [this] { return !queue_.empty() || shutdown_; })) {
 		return false;
 	}
-	if (shutdown_ && queue_.empty()) return false;
-	entry = std::move(const_cast<UrlQueueEntry&>(queue_.top()));
+	if (shutdown_ && queue_.empty())
+		return false;
+	entry = std::move(const_cast<UrlQueueEntry &>(queue_.top()));
 	queue_.pop();
 	return true;
 }
@@ -51,7 +53,7 @@ size_t ThreadSafeUrlQueue::Size() const {
 // ThreadSafeDomainMap Implementation
 //===--------------------------------------------------------------------===//
 
-DomainState& ThreadSafeDomainMap::GetOrCreate(const std::string &domain) {
+DomainState &ThreadSafeDomainMap::GetOrCreate(const std::string &domain) {
 	std::lock_guard<std::mutex> lock(map_mutex_);
 	auto it = domain_states_.find(domain);
 	if (it == domain_states_.end()) {
@@ -61,7 +63,7 @@ DomainState& ThreadSafeDomainMap::GetOrCreate(const std::string &domain) {
 	return *it->second;
 }
 
-DomainState* ThreadSafeDomainMap::TryGet(const std::string &domain) {
+DomainState *ThreadSafeDomainMap::TryGet(const std::string &domain) {
 	std::lock_guard<std::mutex> lock(map_mutex_);
 	auto it = domain_states_.find(domain);
 	return it != domain_states_.end() ? it->second.get() : nullptr;

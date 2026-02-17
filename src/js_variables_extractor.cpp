@@ -11,25 +11,30 @@ using namespace duckdb_yyjson;
 // RAII wrapper for xmlDoc
 class JsVarsDocGuard {
 public:
-	explicit JsVarsDocGuard(xmlDocPtr doc) : doc_(doc) {}
+	explicit JsVarsDocGuard(xmlDocPtr doc) : doc_(doc) {
+	}
 	~JsVarsDocGuard() {
 		if (doc_) {
 			xmlFreeDoc(doc_);
 		}
 	}
-	xmlDocPtr get() const { return doc_; }
-	operator bool() const { return doc_ != nullptr; }
+	xmlDocPtr get() const {
+		return doc_;
+	}
+	operator bool() const {
+		return doc_ != nullptr;
+	}
+
 private:
 	xmlDocPtr doc_;
 };
 
 // Validate and parse JSON, returns doc or nullptr
-static yyjson_doc* TryParseJson(const std::string &json) {
+static yyjson_doc *TryParseJson(const std::string &json) {
 	if (json.empty()) {
 		return nullptr;
 	}
-	return yyjson_read(json.c_str(), json.size(),
-	                   YYJSON_READ_ALLOW_TRAILING_COMMAS | YYJSON_READ_ALLOW_COMMENTS);
+	return yyjson_read(json.c_str(), json.size(), YYJSON_READ_ALLOW_TRAILING_COMMAS | YYJSON_READ_ALLOW_COMMENTS);
 }
 
 // Strip JavaScript comments while preserving strings
@@ -111,7 +116,8 @@ static std::string DecodeJsEscapes(const std::string &s) {
 					result += decoded;
 					i += 3;
 					continue;
-				} catch (...) {}
+				} catch (...) {
+				}
 			} else if (next == 'u' && i + 5 < s.size()) {
 				// \uNNNN unicode escape
 				std::string hex = s.substr(i + 2, 4);
@@ -130,24 +136,41 @@ static std::string DecodeJsEscapes(const std::string &s) {
 					}
 					i += 5;
 					continue;
-				} catch (...) {}
+				} catch (...) {
+				}
 			} else if (next == 'n') {
-				result += '\n'; i++; continue;
+				result += '\n';
+				i++;
+				continue;
 			} else if (next == 'r') {
-				result += '\r'; i++; continue;
+				result += '\r';
+				i++;
+				continue;
 			} else if (next == 't') {
-				result += '\t'; i++; continue;
+				result += '\t';
+				i++;
+				continue;
 			} else if (next == '\\') {
-				result += '\\'; i++; continue;
+				result += '\\';
+				i++;
+				continue;
 			} else if (next == '"') {
-				result += '"'; i++; continue;
+				result += '"';
+				i++;
+				continue;
 			} else if (next == '\'') {
-				result += '\''; i++; continue;
+				result += '\'';
+				i++;
+				continue;
 			} else if (next == '/') {
-				result += '/'; i++; continue;
+				result += '/';
+				i++;
+				continue;
 			} else {
 				// Unknown escape - just output the character (JS treats \X as X for non-special chars)
-				result += next; i++; continue;
+				result += next;
+				i++;
+				continue;
 			}
 		}
 		result += s[i];
@@ -159,8 +182,10 @@ static std::string DecodeJsEscapes(const std::string &s) {
 // Returns decoded JSON string or empty if not found/invalid
 static std::string ExtractJsonParse(const std::string &content, size_t start_pos) {
 	// Check for JSON.parse(
-	if (start_pos + 11 > content.size()) return "";
-	if (content.substr(start_pos, 11) != "JSON.parse(") return "";
+	if (start_pos + 11 > content.size())
+		return "";
+	if (content.substr(start_pos, 11) != "JSON.parse(")
+		return "";
 
 	size_t pos = start_pos + 11;
 
@@ -169,11 +194,13 @@ static std::string ExtractJsonParse(const std::string &content, size_t start_pos
 		pos++;
 	}
 
-	if (pos >= content.size()) return "";
+	if (pos >= content.size())
+		return "";
 
 	// Must be string literal
 	char quote = content[pos];
-	if (quote != '"' && quote != '\'') return "";
+	if (quote != '"' && quote != '\'')
+		return "";
 
 	pos++; // Skip opening quote
 	size_t str_start = pos;
@@ -190,7 +217,8 @@ static std::string ExtractJsonParse(const std::string &content, size_t start_pos
 		pos++;
 	}
 
-	if (pos >= content.size()) return "";
+	if (pos >= content.size())
+		return "";
 
 	std::string encoded = content.substr(str_start, pos - str_start);
 	std::string decoded = DecodeJsEscapes(encoded);
@@ -212,9 +240,8 @@ static std::string ExtractJsonValue(const std::string &content, size_t start_pos
 	}
 
 	// Skip whitespace
-	while (start_pos < content.size() &&
-	       (content[start_pos] == ' ' || content[start_pos] == '\t' ||
-	        content[start_pos] == '\n' || content[start_pos] == '\r')) {
+	while (start_pos < content.size() && (content[start_pos] == ' ' || content[start_pos] == '\t' ||
+	                                      content[start_pos] == '\n' || content[start_pos] == '\r')) {
 		start_pos++;
 	}
 
@@ -370,10 +397,14 @@ static void ExtractVariablesFromScript(const std::string &raw_script, JsVariable
 
 		// Find earliest match
 		size_t earliest = std::string::npos;
-		if (next_var != std::string::npos && next_var < earliest) earliest = next_var;
-		if (next_let != std::string::npos && next_let < earliest) earliest = next_let;
-		if (next_const != std::string::npos && next_const < earliest) earliest = next_const;
-		if (next_window != std::string::npos && next_window < earliest) earliest = next_window;
+		if (next_var != std::string::npos && next_var < earliest)
+			earliest = next_var;
+		if (next_let != std::string::npos && next_let < earliest)
+			earliest = next_let;
+		if (next_const != std::string::npos && next_const < earliest)
+			earliest = next_const;
+		if (next_window != std::string::npos && next_window < earliest)
+			earliest = next_window;
 
 		if (earliest == std::string::npos) {
 			break;
@@ -383,8 +414,8 @@ static void ExtractVariablesFromScript(const std::string &raw_script, JsVariable
 		bool valid_start = (earliest == 0);
 		if (!valid_start && earliest > 0) {
 			char prev = script[earliest - 1];
-			valid_start = (prev == ';' || prev == '\n' || prev == '\r' ||
-			              prev == '{' || prev == '}' || prev == '(' || prev == ')');
+			valid_start = (prev == ';' || prev == '\n' || prev == '\r' || prev == '{' || prev == '}' || prev == '(' ||
+			               prev == ')');
 		}
 
 		if (!valid_start) {
@@ -462,13 +493,8 @@ JsVariablesResult ExtractJsVariables(const std::string &html) {
 	}
 
 	// Parse HTML with libxml2
-	JsVarsDocGuard doc(htmlReadMemory(
-		html.c_str(),
-		static_cast<int>(html.size()),
-		nullptr,
-		"UTF-8",
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	JsVarsDocGuard doc(htmlReadMemory(html.c_str(), static_cast<int>(html.size()), nullptr, "UTF-8",
+	                                  HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return result;
@@ -488,13 +514,11 @@ JsVariablesResult ExtractJsVariables(const std::string &html) {
 					xmlChar *type = xmlGetProp(cur, BAD_CAST "type");
 					bool is_js = true;
 					if (type) {
-						std::string type_str(reinterpret_cast<char*>(type));
+						std::string type_str(reinterpret_cast<char *>(type));
 						xmlFree(type);
 						// Skip non-JS types like application/ld+json, text/template, etc.
-						if (type_str.find("javascript") == std::string::npos &&
-						    type_str != "text/javascript" &&
-						    type_str != "module" &&
-						    !type_str.empty()) {
+						if (type_str.find("javascript") == std::string::npos && type_str != "text/javascript" &&
+						    type_str != "module" && !type_str.empty()) {
 							is_js = false;
 						}
 					}
@@ -502,7 +526,7 @@ JsVariablesResult ExtractJsVariables(const std::string &html) {
 					if (is_js) {
 						xmlChar *content = xmlNodeGetContent(cur);
 						if (content) {
-							std::string script_content(reinterpret_cast<char*>(content));
+							std::string script_content(reinterpret_cast<char *>(content));
 							xmlFree(content);
 							ExtractVariablesFromScript(script_content, result);
 						}

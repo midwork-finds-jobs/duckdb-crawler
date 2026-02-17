@@ -9,23 +9,23 @@ namespace duckdb {
 // Determine HTTP version at compile time based on available features
 #if defined(CRAWLER_HTTP3_SUPPORT) && CRAWLER_HTTP3_SUPPORT
 static constexpr long CRAWLER_HTTP_VERSION = CURL_HTTP_VERSION_3;
-static constexpr const char* CRAWLER_HTTP_VERSION_STR = "HTTP/3";
+static constexpr const char *CRAWLER_HTTP_VERSION_STR = "HTTP/3";
 #elif defined(CRAWLER_HTTP2_SUPPORT) && CRAWLER_HTTP2_SUPPORT
 static constexpr long CRAWLER_HTTP_VERSION = CURL_HTTP_VERSION_2TLS;
-static constexpr const char* CRAWLER_HTTP_VERSION_STR = "HTTP/2";
+static constexpr const char *CRAWLER_HTTP_VERSION_STR = "HTTP/2";
 #else
 static constexpr long CRAWLER_HTTP_VERSION = CURL_HTTP_VERSION_1_1;
-static constexpr const char* CRAWLER_HTTP_VERSION_STR = "HTTP/1.1";
+static constexpr const char *CRAWLER_HTTP_VERSION_STR = "HTTP/1.1";
 #endif
 
 // Global connection pool (singleton)
-static HttpConnectionPool* g_connection_pool = nullptr;
+static HttpConnectionPool *g_connection_pool = nullptr;
 
 // Global HTTP settings with mutex for thread safety
 static HttpSettings g_http_settings;
 static std::mutex g_http_settings_mutex;
 
-HttpConnectionPool& GetConnectionPool() {
+HttpConnectionPool &GetConnectionPool() {
 	if (!g_connection_pool) {
 		g_connection_pool = new HttpConnectionPool();
 	}
@@ -37,7 +37,7 @@ void SetHttpSettings(const HttpSettings &settings) {
 	g_http_settings = settings;
 }
 
-const HttpSettings& GetHttpSettings() {
+const HttpSettings &GetHttpSettings() {
 	std::lock_guard<std::mutex> lock(g_http_settings_mutex);
 	return g_http_settings;
 }
@@ -61,28 +61,29 @@ HttpConnectionPool::HttpConnectionPool() : initialized_(true) {
 
 HttpConnectionPool::~HttpConnectionPool() {
 	std::lock_guard<std::mutex> lock(pool_mutex_);
-	for (CURL* handle : available_handles_) {
+	for (CURL *handle : available_handles_) {
 		curl_easy_cleanup(handle);
 	}
 	available_handles_.clear();
 	initialized_ = false;
 }
 
-CURL* HttpConnectionPool::AcquireHandle() {
+CURL *HttpConnectionPool::AcquireHandle() {
 	std::lock_guard<std::mutex> lock(pool_mutex_);
 	if (!available_handles_.empty()) {
-		CURL* handle = available_handles_.back();
+		CURL *handle = available_handles_.back();
 		available_handles_.pop_back();
-		curl_easy_reset(handle);  // Reset for reuse but keep connection alive
+		curl_easy_reset(handle); // Reset for reuse but keep connection alive
 		return handle;
 	}
 	return curl_easy_init();
 }
 
-void HttpConnectionPool::ReleaseHandle(CURL* handle) {
-	if (!handle) return;
+void HttpConnectionPool::ReleaseHandle(CURL *handle) {
+	if (!handle)
+		return;
 	std::lock_guard<std::mutex> lock(pool_mutex_);
-	if (initialized_ && available_handles_.size() < 100) {  // Max 100 pooled handles
+	if (initialized_ && available_handles_.size() < 100) { // Max 100 pooled handles
 		available_handles_.push_back(handle);
 	} else {
 		curl_easy_cleanup(handle);
@@ -124,7 +125,7 @@ int HttpClient::ParseRetryAfter(const std::string &retry_after) {
 
 // Callback data structures
 struct WriteData {
-	std::string* body;
+	std::string *body;
 };
 
 struct HeaderData {
@@ -137,33 +138,33 @@ struct HeaderData {
 };
 
 // Write callback for response body
-static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+static size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp) {
 	size_t total_size = size * nmemb;
-	WriteData* data = static_cast<WriteData*>(userp);
-	data->body->append(static_cast<char*>(contents), total_size);
+	WriteData *data = static_cast<WriteData *>(userp);
+	data->body->append(static_cast<char *>(contents), total_size);
 	return total_size;
 }
 
 // Helper to trim whitespace
-static std::string TrimString(const std::string& str) {
+static std::string TrimString(const std::string &str) {
 	size_t start = str.find_first_not_of(" \t\r\n");
-	if (start == std::string::npos) return "";
+	if (start == std::string::npos)
+		return "";
 	size_t end = str.find_last_not_of(" \t\r\n");
 	return str.substr(start, end - start + 1);
 }
 
 // Helper to lowercase string
-static std::string ToLower(const std::string& str) {
+static std::string ToLower(const std::string &str) {
 	std::string result = str;
-	std::transform(result.begin(), result.end(), result.begin(),
-	               [](unsigned char c) { return std::tolower(c); });
+	std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
 	return result;
 }
 
 // Header callback for response headers
-static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata) {
+static size_t HeaderCallback(char *buffer, size_t size, size_t nitems, void *userdata) {
 	size_t total_size = size * nitems;
-	HeaderData* headers = static_cast<HeaderData*>(userdata);
+	HeaderData *headers = static_cast<HeaderData *>(userdata);
 
 	std::string header(buffer, total_size);
 
@@ -195,13 +196,12 @@ static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* use
 	return total_size;
 }
 
-HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
-                                         const std::string &user_agent, bool compress,
-                                         const std::string &if_none_match, const std::string &if_modified_since) {
+HttpResponse HttpClient::ExecuteHttpGet(const std::string &url, const std::string &user_agent, bool compress,
+                                        const std::string &if_none_match, const std::string &if_modified_since) {
 	HttpResponse response;
 
-	auto& pool = GetConnectionPool();
-	CURL* curl = pool.AcquireHandle();
+	auto &pool = GetConnectionPool();
+	CURL *curl = pool.AcquireHandle();
 	if (!curl) {
 		response.error = "Failed to acquire curl handle";
 		return response;
@@ -209,7 +209,7 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 
 	// Response data
 	std::string body;
-	WriteData write_data{&body};
+	WriteData write_data {&body};
 	HeaderData header_data;
 
 	// Set URL
@@ -235,7 +235,7 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 	}
 
 	// Apply global HTTP settings (from DuckDB configuration)
-	const HttpSettings& settings = GetHttpSettings();
+	const HttpSettings &settings = GetHttpSettings();
 
 	// Set timeout from settings
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, static_cast<long>(settings.timeout_seconds));
@@ -260,7 +260,7 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 	curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
 
 	// Build custom headers for conditional requests
-	struct curl_slist* custom_headers = nullptr;
+	struct curl_slist *custom_headers = nullptr;
 	if (!if_none_match.empty()) {
 		std::string header = "If-None-Match: " + if_none_match;
 		custom_headers = curl_slist_append(custom_headers, header.c_str());
@@ -288,7 +288,7 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 		response.http_version = http_version;
 
 		// Get redirect info
-		char* effective_url = nullptr;
+		char *effective_url = nullptr;
 		curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective_url);
 		if (effective_url) {
 			response.final_url = effective_url;
@@ -322,9 +322,8 @@ HttpResponse HttpClient::ExecuteHttpGet(const std::string &url,
 	return response;
 }
 
-HttpResponse HttpClient::Fetch(const std::string &url, const RetryConfig &config,
-                               const std::string &user_agent, bool compress,
-                               const std::string &if_none_match, const std::string &if_modified_since) {
+HttpResponse HttpClient::Fetch(const std::string &url, const RetryConfig &config, const std::string &user_agent,
+                               bool compress, const std::string &if_none_match, const std::string &if_modified_since) {
 	// Single attempt - crawler handles all retries with Fibonacci backoff
 	return ExecuteHttpGet(url, user_agent, compress, if_none_match, if_modified_since);
 }

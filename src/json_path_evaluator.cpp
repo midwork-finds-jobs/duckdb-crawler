@@ -100,8 +100,7 @@ JsonPath ParseJsonPath(const std::string &expr) {
 		// Unquoted key or number
 		else {
 			size_t key_end = pos;
-			while (key_end < trimmed.length() && trimmed[key_end] != '-' &&
-			       !std::isspace(trimmed[key_end])) {
+			while (key_end < trimmed.length() && trimmed[key_end] != '-' && !std::isspace(trimmed[key_end])) {
 				key_end++;
 			}
 			std::string key = TrimStr(trimmed.substr(pos, key_end - pos));

@@ -7,18 +7,19 @@ namespace duckdb {
 
 // Segment in a JSON path expression like jsonld->'Product'->>'name'
 struct JsonPathSegment {
-	std::string key;       // Object key (e.g., "Product", "name")
-	int array_index;       // For array access (e.g., [0]), -1 if not array access
-	bool return_text;      // true for ->> (text output), false for -> (JSON output)
+	std::string key;  // Object key (e.g., "Product", "name")
+	int array_index;  // For array access (e.g., [0]), -1 if not array access
+	bool return_text; // true for ->> (text output), false for -> (JSON output)
 
-	JsonPathSegment() : array_index(-1), return_text(false) {}
+	JsonPathSegment() : array_index(-1), return_text(false) {
+	}
 };
 
 // Parsed JSON path expression
 struct JsonPath {
-	std::string base_column;           // Source column: jsonld, opengraph, meta, hydration, js
+	std::string base_column; // Source column: jsonld, opengraph, meta, hydration, js
 	std::vector<JsonPathSegment> segments;
-	bool is_text_output;               // Final output is text (last operator was ->>)
+	bool is_text_output; // Final output is text (last operator was ->>)
 };
 
 // Parse a JSON path expression like "jsonld->'Product'->>'name'"

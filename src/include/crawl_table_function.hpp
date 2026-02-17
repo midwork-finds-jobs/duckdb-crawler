@@ -8,12 +8,12 @@ namespace duckdb {
 
 // Parsed extraction spec: "name := $(selector)" or "name := jsonld.Type.field"
 struct CrawlExtractSpec {
-    string name;        // Output field name
-    string source;      // css, jsonld, opengraph, meta, js
-    string selector;    // CSS selector or path
-    string accessor;    // text, html, attr:name, etc.
-    bool as_json;       // ::json suffix - return as JSON type
-    bool expand_array;  // [*] suffix - expand array to multiple rows
+	string name;       // Output field name
+	string source;     // css, jsonld, opengraph, meta, js
+	string selector;   // CSS selector or path
+	string accessor;   // text, html, attr:name, etc.
+	bool as_json;      // ::json suffix - return as JSON type
+	bool expand_array; // [*] suffix - expand array to multiple rows
 };
 
 // Parse extraction spec string into structured form

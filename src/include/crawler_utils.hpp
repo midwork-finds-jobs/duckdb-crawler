@@ -24,7 +24,7 @@ enum class CrawlErrorType : uint8_t {
 	MAX_RETRIES_EXCEEDED = 11
 };
 
-const char* ErrorTypeToString(CrawlErrorType type);
+const char *ErrorTypeToString(CrawlErrorType type);
 CrawlErrorType ClassifyError(int status_code, const std::string &error_msg);
 
 //===--------------------------------------------------------------------===//
@@ -88,8 +88,7 @@ std::string GenerateContentHash(const std::string &content);
 bool ContentTypeMatches(const std::string &content_type, const std::string &pattern);
 
 // Check if content-type is acceptable (matches accept list, not in reject list)
-bool IsContentTypeAcceptable(const std::string &content_type,
-                             const std::string &accept_types,
+bool IsContentTypeAcceptable(const std::string &content_type, const std::string &accept_types,
                              const std::string &reject_types);
 
 //===--------------------------------------------------------------------===//

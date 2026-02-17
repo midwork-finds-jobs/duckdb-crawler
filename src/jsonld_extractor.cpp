@@ -12,14 +12,20 @@ using namespace duckdb_yyjson;
 // RAII wrapper for xmlDoc
 class XmlDocGuard {
 public:
-	explicit XmlDocGuard(xmlDocPtr doc) : doc_(doc) {}
+	explicit XmlDocGuard(xmlDocPtr doc) : doc_(doc) {
+	}
 	~XmlDocGuard() {
 		if (doc_) {
 			xmlFreeDoc(doc_);
 		}
 	}
-	xmlDocPtr get() const { return doc_; }
-	operator bool() const { return doc_ != nullptr; }
+	xmlDocPtr get() const {
+		return doc_;
+	}
+	operator bool() const {
+		return doc_ != nullptr;
+	}
+
 private:
 	xmlDocPtr doc_;
 };
@@ -27,14 +33,20 @@ private:
 // RAII wrapper for yyjson_doc
 class YyjsonDocGuard {
 public:
-	explicit YyjsonDocGuard(yyjson_doc *doc) : doc_(doc) {}
+	explicit YyjsonDocGuard(yyjson_doc *doc) : doc_(doc) {
+	}
 	~YyjsonDocGuard() {
 		if (doc_) {
 			yyjson_doc_free(doc_);
 		}
 	}
-	yyjson_doc *get() const { return doc_; }
-	operator bool() const { return doc_ != nullptr; }
+	yyjson_doc *get() const {
+		return doc_;
+	}
+	operator bool() const {
+		return doc_ != nullptr;
+	}
+
 private:
 	yyjson_doc *doc_;
 };
@@ -113,13 +125,10 @@ static void ProcessJsonLdDocument(const std::string &json_content, JsonLdResult 
 
 	// Parse JSON with yyjson
 	yyjson_read_err err;
-	YyjsonDocGuard doc(yyjson_read_opts(
-		const_cast<char*>(json_content.c_str()),
-		json_content.size(),
-		YYJSON_READ_ALLOW_TRAILING_COMMAS | YYJSON_READ_ALLOW_COMMENTS,
-		nullptr, // allocator
-		&err
-	));
+	YyjsonDocGuard doc(yyjson_read_opts(const_cast<char *>(json_content.c_str()), json_content.size(),
+	                                    YYJSON_READ_ALLOW_TRAILING_COMMAS | YYJSON_READ_ALLOW_COMMENTS,
+	                                    nullptr, // allocator
+	                                    &err));
 
 	if (!doc) {
 		// Invalid JSON, skip
@@ -166,13 +175,10 @@ static std::vector<std::string> FindJsonLdScripts(const std::string &html) {
 	}
 
 	// Parse HTML with libxml2
-	XmlDocGuard doc(htmlReadMemory(
-		html.c_str(),
-		static_cast<int>(html.size()),
-		nullptr,     // URL
-		"UTF-8",     // encoding
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	XmlDocGuard doc(htmlReadMemory(html.c_str(), static_cast<int>(html.size()),
+	                               nullptr, // URL
+	                               "UTF-8", // encoding
+	                               HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return scripts;
@@ -193,7 +199,7 @@ static std::vector<std::string> FindJsonLdScripts(const std::string &html) {
 					// Check type attribute
 					xmlChar *type = xmlGetProp(cur, BAD_CAST "type");
 					if (type) {
-						std::string type_str(reinterpret_cast<char*>(type));
+						std::string type_str(reinterpret_cast<char *>(type));
 						xmlFree(type);
 
 						// Case-insensitive comparison
@@ -201,7 +207,7 @@ static std::vector<std::string> FindJsonLdScripts(const std::string &html) {
 							// Get text content
 							xmlChar *content = xmlNodeGetContent(cur);
 							if (content) {
-								std::string content_str(reinterpret_cast<char*>(content));
+								std::string content_str(reinterpret_cast<char *>(content));
 								xmlFree(content);
 
 								// Trim whitespace

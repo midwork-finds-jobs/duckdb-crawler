@@ -24,8 +24,7 @@ static std::string Trim(const std::string &str) {
 // Convert string to lowercase
 static std::string ToLower(const std::string &str) {
 	std::string result = str;
-	std::transform(result.begin(), result.end(), result.begin(),
-	               [](unsigned char c) { return std::tolower(c); });
+	std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
 	return result;
 }
 
@@ -36,8 +35,7 @@ static bool StartsWithCaseInsensitive(const std::string &str, const std::string 
 	}
 
 	for (size_t i = 0; i < prefix.length(); i++) {
-		if (std::tolower(static_cast<unsigned char>(str[i])) !=
-		    std::tolower(static_cast<unsigned char>(prefix[i]))) {
+		if (std::tolower(static_cast<unsigned char>(str[i])) != std::tolower(static_cast<unsigned char>(prefix[i]))) {
 			return false;
 		}
 	}

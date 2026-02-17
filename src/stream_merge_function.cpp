@@ -28,9 +28,8 @@ namespace duckdb {
 
 // Build query to find URLs that should be EXCLUDED from crawling
 // These are URLs that exist in target AND don't match the WHEN MATCHED AND condition
-static string BuildExclusionQuery(const string &target_table,
-                                   const vector<string> &join_columns,
-                                   const string &matched_condition) {
+static string BuildExclusionQuery(const string &target_table, const vector<string> &join_columns,
+                                  const string &matched_condition) {
 	if (join_columns.empty()) {
 		return "";
 	}
@@ -39,7 +38,8 @@ static string BuildExclusionQuery(const string &target_table,
 	// These are rows that exist but WON'T be updated (fresh rows)
 	string sql = "SELECT ";
 	for (size_t i = 0; i < join_columns.size(); i++) {
-		if (i > 0) sql += ", ";
+		if (i > 0)
+			sql += ", ";
 		sql += QuoteSqlIdentifier(join_columns[i]);
 	}
 	sql += " FROM " + QuoteSqlIdentifier(target_table);
@@ -53,10 +53,8 @@ static string BuildExclusionQuery(const string &target_table,
 }
 
 // Get set of values to exclude from crawling
-static unordered_set<string> GetExcludedValues(Connection &conn,
-                                                const string &target_table,
-                                                const vector<string> &join_columns,
-                                                const string &matched_condition) {
+static unordered_set<string> GetExcludedValues(Connection &conn, const string &target_table,
+                                               const vector<string> &join_columns, const string &matched_condition) {
 	unordered_set<string> excluded;
 
 	string query = BuildExclusionQuery(target_table, join_columns, matched_condition);
@@ -76,7 +74,8 @@ static unordered_set<string> GetExcludedValues(Connection &conn,
 			// For multiple, concatenate with separator
 			string key;
 			for (idx_t col = 0; col < chunk->ColumnCount(); col++) {
-				if (col > 0) key += "\x1F";  // Unit separator
+				if (col > 0)
+					key += "\x1F"; // Unit separator
 				auto val = chunk->GetValue(col, row);
 				if (!val.IsNull()) {
 					key += val.ToString();
@@ -102,11 +101,9 @@ static unordered_set<string> GetExcludedValues(Connection &conn,
 //   FROM urls_to_crawl utc
 //   WHERE utc.url NOT IN (SELECT url FROM __fresh),
 //   LATERAL crawl_url(utc.url)
-static string RewriteQueryWithExclusion(const string &source_query,
-                                         const string &source_alias,
-                                         const string &target_table,
-                                         const vector<string> &join_columns,
-                                         const string &matched_condition) {
+static string RewriteQueryWithExclusion(const string &source_query, const string &source_alias,
+                                        const string &target_table, const vector<string> &join_columns,
+                                        const string &matched_condition) {
 	if (join_columns.empty() || matched_condition.empty()) {
 		return source_query;
 	}
@@ -117,7 +114,8 @@ static string RewriteQueryWithExclusion(const string &source_query,
 	// Build exclusion CTE
 	string exclusion_cols;
 	for (size_t i = 0; i < join_columns.size(); i++) {
-		if (i > 0) exclusion_cols += ", ";
+		if (i > 0)
+			exclusion_cols += ", ";
 		exclusion_cols += QuoteSqlIdentifier(join_columns[i]);
 	}
 
@@ -142,8 +140,10 @@ static string RewriteQueryWithExclusion(const string &source_query,
 	int depth = 1;
 	size_t paren_end = paren_start + 1;
 	while (paren_end < query.length() && depth > 0) {
-		if (query[paren_end] == '(') depth++;
-		else if (query[paren_end] == ')') depth--;
+		if (query[paren_end] == '(')
+			depth++;
+		else if (query[paren_end] == ')')
+			depth--;
 		paren_end++;
 	}
 
@@ -153,12 +153,13 @@ static string RewriteQueryWithExclusion(const string &source_query,
 
 	// Extract URL expression (e.g., "utc.url")
 	string url_expr = query.substr(paren_start + 1, paren_end - paren_start - 2);
-	while (!url_expr.empty() && std::isspace(url_expr.front())) url_expr.erase(0, 1);
-	while (!url_expr.empty() && std::isspace(url_expr.back())) url_expr.pop_back();
+	while (!url_expr.empty() && std::isspace(url_expr.front()))
+		url_expr.erase(0, 1);
+	while (!url_expr.empty() && std::isspace(url_expr.back()))
+		url_expr.pop_back();
 
 	// Build the WHERE filter
-	string filter = url_expr + " NOT IN (SELECT " + QuoteSqlIdentifier(join_columns[0]) +
-	                " FROM __stream_merge_fresh)";
+	string filter = url_expr + " NOT IN (SELECT " + QuoteSqlIdentifier(join_columns[0]) + " FROM __stream_merge_fresh)";
 
 	// Find the comma before LATERAL
 	size_t comma_pos = query.rfind(',', lateral_pos);
@@ -169,7 +170,7 @@ static string RewriteQueryWithExclusion(const string &source_query,
 	// Insert WHERE clause before the comma
 	// Transform: "FROM tbl alias, LATERAL" -> "FROM tbl alias WHERE filter, LATERAL"
 	string before_comma = query.substr(0, comma_pos);
-	string after_comma = query.substr(comma_pos);  // includes the comma
+	string after_comma = query.substr(comma_pos); // includes the comma
 
 	// Check if there's already a WHERE clause before the comma
 	string before_comma_lower = StringUtil::Lower(before_comma);
@@ -192,8 +193,8 @@ static string RewriteQueryWithExclusion(const string &source_query,
 	if (with_pos != string::npos && with_pos < select_pos) {
 		// Already has WITH clause, append our CTE
 		// Find the SELECT after WITH
-		modified_query = modified_query.substr(0, select_pos) + ", " + fresh_cte + "\n" +
-		                 modified_query.substr(select_pos);
+		modified_query =
+		    modified_query.substr(0, select_pos) + ", " + fresh_cte + "\n" + modified_query.substr(select_pos);
 	} else {
 		// No WITH clause, prepend
 		modified_query = "WITH " + fresh_cte + "\n" + modified_query;
@@ -205,10 +206,7 @@ static string RewriteQueryWithExclusion(const string &source_query,
 //===--------------------------------------------------------------------===//
 // MergeMatchedAction enum (must match header)
 //===--------------------------------------------------------------------===//
-enum class MergeAction : int32_t {
-	UPDATE = 0,
-	DELETE = 1
-};
+enum class MergeAction : int32_t { UPDATE = 0, DELETE = 1 };
 
 //===--------------------------------------------------------------------===//
 // Bind Data
@@ -252,10 +250,12 @@ struct CrawlingMergeGlobalState : public GlobalTableFunctionState {
 	int64_t rows_deleted = 0;
 
 	// Progress tracking for progress bar
-	std::atomic<int64_t> total_rows{0};
-	std::atomic<int64_t> processed_rows{0};
+	std::atomic<int64_t> total_rows {0};
+	std::atomic<int64_t> processed_rows {0};
 
-	idx_t MaxThreads() const override { return 1; }
+	idx_t MaxThreads() const override {
+		return 1;
+	}
 };
 
 //===--------------------------------------------------------------------===//
@@ -263,7 +263,7 @@ struct CrawlingMergeGlobalState : public GlobalTableFunctionState {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> CrawlingMergeBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
 	auto bind_data = make_uniq<CrawlingMergeBindData>();
 
 	// Parameters from parser (see PlanCrawl in crawl_parser.cpp)
@@ -303,14 +303,16 @@ static unique_ptr<FunctionData> CrawlingMergeBind(ClientContext &context, TableF
 		size_t pos = 0;
 		while (pos < set_clauses_str.length()) {
 			size_t semi = set_clauses_str.find(';', pos);
-			string clause = semi == string::npos ? set_clauses_str.substr(pos) : set_clauses_str.substr(pos, semi - pos);
+			string clause =
+			    semi == string::npos ? set_clauses_str.substr(pos) : set_clauses_str.substr(pos, semi - pos);
 			size_t eq = clause.find('=');
 			if (eq != string::npos) {
 				string col = clause.substr(0, eq);
 				string expr = clause.substr(eq + 1);
 				bind_data->not_matched_by_source_set_clauses.push_back({col, expr});
 			}
-			if (semi == string::npos) break;
+			if (semi == string::npos)
+				break;
 			pos = semi + 1;
 		}
 	}
@@ -342,8 +344,7 @@ static unique_ptr<GlobalTableFunctionState> CrawlingMergeInitGlobal(ClientContex
 //===--------------------------------------------------------------------===//
 
 // Build WHERE clause with values substituted from source row
-static string BuildWhereClause(const CrawlingMergeBindData &bind_data,
-                               const vector<string> &col_names,
+static string BuildWhereClause(const CrawlingMergeBindData &bind_data, const vector<string> &col_names,
                                unique_ptr<DataChunk> &chunk, idx_t row) {
 	// Parse join_condition and substitute alias.col references with actual values
 	string where_clause = bind_data.join_condition;
@@ -372,12 +373,10 @@ static string BuildWhereClause(const CrawlingMergeBindData &bind_data,
 }
 
 // Check if row exists in target table
-static bool CheckExists(Connection &conn, const CrawlingMergeBindData &bind_data,
-                        const vector<string> &col_names,
+static bool CheckExists(Connection &conn, const CrawlingMergeBindData &bind_data, const vector<string> &col_names,
                         unique_ptr<DataChunk> &chunk, idx_t row) {
 	string where_clause = BuildWhereClause(bind_data, col_names, chunk, row);
-	string sql = "SELECT 1 FROM " + QuoteSqlIdentifier(bind_data.target_table) +
-	             " WHERE " + where_clause + " LIMIT 1";
+	string sql = "SELECT 1 FROM " + QuoteSqlIdentifier(bind_data.target_table) + " WHERE " + where_clause + " LIMIT 1";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		return false;
@@ -388,18 +387,17 @@ static bool CheckExists(Connection &conn, const CrawlingMergeBindData &bind_data
 
 // Check if matched condition is satisfied
 static bool CheckMatchedCondition(Connection &conn, const CrawlingMergeBindData &bind_data,
-                                  const vector<string> &col_names,
-                                  unique_ptr<DataChunk> &chunk, idx_t row) {
+                                  const vector<string> &col_names, unique_ptr<DataChunk> &chunk, idx_t row) {
 	if (bind_data.matched_condition.empty()) {
-		return true;  // No condition = always match
+		return true; // No condition = always match
 	}
 
 	string where_clause = BuildWhereClause(bind_data, col_names, chunk, row);
 
 	// Build query to check both join condition AND matched condition
 	// The matched condition may reference target table columns
-	string sql = "SELECT 1 FROM " + QuoteSqlIdentifier(bind_data.target_table) +
-	             " WHERE " + where_clause + " AND (" + bind_data.matched_condition + ") LIMIT 1";
+	string sql = "SELECT 1 FROM " + QuoteSqlIdentifier(bind_data.target_table) + " WHERE " + where_clause + " AND (" +
+	             bind_data.matched_condition + ") LIMIT 1";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		return false;
@@ -409,10 +407,8 @@ static bool CheckMatchedCondition(Connection &conn, const CrawlingMergeBindData 
 }
 
 // Build UPDATE BY NAME statement
-static string BuildUpdateByName(const CrawlingMergeBindData &bind_data,
-                                const vector<string> &col_names,
-                                const vector<LogicalType> &col_types,
-                                unique_ptr<DataChunk> &chunk, idx_t row) {
+static string BuildUpdateByName(const CrawlingMergeBindData &bind_data, const vector<string> &col_names,
+                                const vector<LogicalType> &col_types, unique_ptr<DataChunk> &chunk, idx_t row) {
 	string sql = "UPDATE " + QuoteSqlIdentifier(bind_data.target_table) + " SET ";
 
 	// Set columns by name, excluding join columns
@@ -427,9 +423,11 @@ static string BuildUpdateByName(const CrawlingMergeBindData &bind_data,
 				break;
 			}
 		}
-		if (is_join_col) continue;
+		if (is_join_col)
+			continue;
 
-		if (!first) sql += ", ";
+		if (!first)
+			sql += ", ";
 		first = false;
 
 		auto val = chunk->GetValue(col, row);
@@ -444,23 +442,22 @@ static string BuildUpdateByName(const CrawlingMergeBindData &bind_data,
 }
 
 // Build DELETE statement
-static string BuildDelete(const CrawlingMergeBindData &bind_data,
-                          const vector<string> &col_names,
+static string BuildDelete(const CrawlingMergeBindData &bind_data, const vector<string> &col_names,
                           unique_ptr<DataChunk> &chunk, idx_t row) {
-	return "DELETE FROM " + QuoteSqlIdentifier(bind_data.target_table) +
-	       " WHERE " + BuildWhereClause(bind_data, col_names, chunk, row);
+	return "DELETE FROM " + QuoteSqlIdentifier(bind_data.target_table) + " WHERE " +
+	       BuildWhereClause(bind_data, col_names, chunk, row);
 }
 
 // Build INSERT BY NAME statement using DuckDB's INSERT BY NAME syntax
-static string BuildInsertByName(const CrawlingMergeBindData &bind_data,
-                                const vector<string> &col_names,
+static string BuildInsertByName(const CrawlingMergeBindData &bind_data, const vector<string> &col_names,
                                 unique_ptr<DataChunk> &chunk, idx_t row) {
 	// DuckDB supports: INSERT INTO table BY NAME SELECT ... AS col1, ... AS col2
 	// Build: INSERT INTO target BY NAME (SELECT val1 AS col1, val2 AS col2, ...)
 	string sql = "INSERT INTO " + QuoteSqlIdentifier(bind_data.target_table) + " BY NAME (SELECT ";
 
 	for (idx_t col = 0; col < col_names.size(); col++) {
-		if (col > 0) sql += ", ";
+		if (col > 0)
+			sql += ", ";
 		auto val = chunk->GetValue(col, row);
 		sql += val.IsNull() ? "NULL" : val.ToSQLString();
 		sql += " AS " + QuoteSqlIdentifier(col_names[col]);
@@ -500,19 +497,15 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 
 	if (!bind_data.matched_condition.empty() && !bind_data.join_columns.empty()) {
 		// Check if target table exists first (use parameterized query to avoid injection)
-		auto table_check = conn.Query(
-			"SELECT 1 FROM information_schema.tables WHERE table_name = $1 LIMIT 1",
-			bind_data.target_table);
+		auto table_check =
+		    conn.Query("SELECT 1 FROM information_schema.tables WHERE table_name = $1 LIMIT 1", bind_data.target_table);
 		auto table_exists = table_check->Fetch();
 
 		if (table_exists && table_exists->size() > 0) {
 			// Table exists, apply pushdown optimization
-			effective_query = RewriteQueryWithExclusion(
-				bind_data.source_query,
-				bind_data.source_alias,
-				bind_data.target_table,
-				bind_data.join_columns,
-				bind_data.matched_condition);
+			effective_query =
+			    RewriteQueryWithExclusion(bind_data.source_query, bind_data.source_alias, bind_data.target_table,
+			                              bind_data.join_columns, bind_data.matched_condition);
 		}
 	}
 
@@ -557,14 +550,15 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 
 	if (first_chunk && first_chunk->size() > 0) {
 		// Check if table exists
-		auto check_result = conn.Query("SELECT 1 FROM information_schema.tables WHERE table_name = $1",
-		                               bind_data.target_table);
+		auto check_result =
+		    conn.Query("SELECT 1 FROM information_schema.tables WHERE table_name = $1", bind_data.target_table);
 		auto check_chunk = check_result->Fetch();
 		if (!check_chunk || check_chunk->size() == 0) {
 			// Create table with columns from query result
 			string create_sql = "CREATE TABLE " + QuoteSqlIdentifier(bind_data.target_table) + " (";
 			for (idx_t i = 0; i < col_names.size(); i++) {
-				if (i > 0) create_sql += ", ";
+				if (i > 0)
+					create_sql += ", ";
 				create_sql += QuoteSqlIdentifier(col_names[i]) + " " + col_types[i].ToString();
 			}
 			create_sql += ")";
@@ -587,7 +581,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 			// Find column index by name
 			for (idx_t col = 0; col < col_names.size(); col++) {
 				if (StringUtil::Lower(col_names[col]) == StringUtil::Lower(jc)) {
-					if (!key.empty()) key += "\x1F";  // Unit separator
+					if (!key.empty())
+						key += "\x1F"; // Unit separator
 					auto val = chunk->GetValue(col, row);
 					if (!val.IsNull()) {
 						key += val.ToString();
@@ -602,7 +597,7 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 	auto process_row = [&](unique_ptr<DataChunk> &chunk, idx_t row) -> bool {
 		// Check limit
 		if (bind_data.row_limit > 0 && total_processed >= bind_data.row_limit) {
-			return false;  // Stop processing
+			return false; // Stop processing
 		}
 
 		// Track join key for NOT MATCHED BY SOURCE
@@ -646,7 +641,7 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 		// Update progress bar
 		state.processed_rows.fetch_add(1);
 
-		return true;  // Continue processing
+		return true; // Continue processing
 	};
 
 	// Process first chunk
@@ -659,7 +654,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 
 	// Process remaining chunks (already collected)
 	for (auto &chunk : all_chunks) {
-		if (!continue_processing) break;
+		if (!continue_processing)
+			break;
 		for (idx_t row = 0; row < chunk->size() && continue_processing; row++) {
 			continue_processing = process_row(chunk, row);
 		}
@@ -670,7 +666,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 		// Query all join keys from target
 		string target_keys_sql = "SELECT ";
 		for (size_t i = 0; i < bind_data.join_columns.size(); i++) {
-			if (i > 0) target_keys_sql += ", ";
+			if (i > 0)
+				target_keys_sql += ", ";
 			target_keys_sql += QuoteSqlIdentifier(bind_data.join_columns[i]);
 		}
 		target_keys_sql += " FROM " + QuoteSqlIdentifier(bind_data.target_table);
@@ -687,7 +684,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 					// Build join key from target row
 					string key;
 					for (idx_t col = 0; col < target_chunk->ColumnCount(); col++) {
-						if (col > 0) key += "\x1F";
+						if (col > 0)
+							key += "\x1F";
 						auto val = target_chunk->GetValue(col, row);
 						if (!val.IsNull()) {
 							key += val.ToString();
@@ -699,7 +697,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 						// Build WHERE clause for this target row
 						string where_clause;
 						for (idx_t col = 0; col < bind_data.join_columns.size(); col++) {
-							if (col > 0) where_clause += " AND ";
+							if (col > 0)
+								where_clause += " AND ";
 							auto val = target_chunk->GetValue(col, row);
 							where_clause += QuoteSqlIdentifier(bind_data.join_columns[col]) + " = ";
 							where_clause += val.IsNull() ? "NULL" : val.ToSQLString();
@@ -707,8 +706,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 
 						if (bind_data.not_matched_by_source_action == MergeAction::DELETE) {
 							// DELETE unmatched rows
-							string sql = "DELETE FROM " + QuoteSqlIdentifier(bind_data.target_table) +
-							             " WHERE " + where_clause;
+							string sql =
+							    "DELETE FROM " + QuoteSqlIdentifier(bind_data.target_table) + " WHERE " + where_clause;
 							auto result = conn.Query(sql);
 							if (!result->HasError()) {
 								rows_deleted++;
@@ -719,7 +718,8 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 								string sql = "UPDATE " + QuoteSqlIdentifier(bind_data.target_table) + " SET ";
 								bool first = true;
 								for (const auto &clause : bind_data.not_matched_by_source_set_clauses) {
-									if (!first) sql += ", ";
+									if (!first)
+										sql += ", ";
 									first = false;
 									sql += QuoteSqlIdentifier(clause.first) + " = " + clause.second;
 								}
@@ -758,9 +758,9 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 //===--------------------------------------------------------------------===//
 
 static double CrawlingMergeProgress(ClientContext &context, const FunctionData *bind_data_p,
-                                   const GlobalTableFunctionState *gstate_p) {
+                                    const GlobalTableFunctionState *gstate_p) {
 	if (!gstate_p) {
-		return -1.0;  // Unknown progress
+		return -1.0; // Unknown progress
 	}
 
 	auto &gstate = gstate_p->Cast<CrawlingMergeGlobalState>();
@@ -769,7 +769,7 @@ static double CrawlingMergeProgress(ClientContext &context, const FunctionData *
 	int64_t processed = gstate.processed_rows.load();
 
 	if (total <= 0) {
-		return -1.0;  // Still collecting rows
+		return -1.0; // Still collecting rows
 	}
 
 	return (static_cast<double>(processed) / static_cast<double>(total)) * 100.0;
@@ -787,12 +787,11 @@ void RegisterCrawlingMergeFunction(ExtensionLoader &loader) {
 	//             not_matched_by_source_update_by_name, not_matched_by_source_set_clauses,
 	//             row_limit, batch_size
 	TableFunction func("stream_merge_internal",
-	                   {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                    LogicalType::VARCHAR, LogicalType::VARCHAR,
-	                    LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BOOLEAN,
-	                    LogicalType::BOOLEAN, LogicalType::BOOLEAN,
-	                    LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BOOLEAN,
-	                    LogicalType::VARCHAR,  // SET clauses as "col=expr;col=expr"
+	                   {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                    LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::INTEGER,
+	                    LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
+	                    LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BOOLEAN,
+	                    LogicalType::VARCHAR, // SET clauses as "col=expr;col=expr"
 	                    LogicalType::BIGINT, LogicalType::BIGINT},
 	                   CrawlingMergeFunction, CrawlingMergeBind, CrawlingMergeInitGlobal);
 

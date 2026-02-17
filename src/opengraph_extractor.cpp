@@ -11,14 +11,20 @@ using namespace duckdb_yyjson;
 // RAII wrapper for xmlDoc
 class HtmlDocGuard {
 public:
-	explicit HtmlDocGuard(xmlDocPtr doc) : doc_(doc) {}
+	explicit HtmlDocGuard(xmlDocPtr doc) : doc_(doc) {
+	}
 	~HtmlDocGuard() {
 		if (doc_) {
 			xmlFreeDoc(doc_);
 		}
 	}
-	xmlDocPtr get() const { return doc_; }
-	operator bool() const { return doc_ != nullptr; }
+	xmlDocPtr get() const {
+		return doc_;
+	}
+	operator bool() const {
+		return doc_ != nullptr;
+	}
+
 private:
 	xmlDocPtr doc_;
 };
@@ -29,7 +35,7 @@ static std::string GetAttribute(xmlNodePtr node, const char *attr) {
 	if (!value) {
 		return "";
 	}
-	std::string result(reinterpret_cast<char*>(value));
+	std::string result(reinterpret_cast<char *>(value));
 	xmlFree(value);
 	return result;
 }
@@ -43,13 +49,8 @@ static std::string DecodeHtmlEntities(const std::string &str) {
 	// xmlDecodeEntitiesReentrant requires a document context
 	// For standalone decoding, we parse a minimal HTML doc
 	std::string wrapped = "<!DOCTYPE html><html><body>" + str + "</body></html>";
-	HtmlDocGuard doc(htmlReadMemory(
-		wrapped.c_str(),
-		static_cast<int>(wrapped.size()),
-		nullptr,
-		"UTF-8",
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	HtmlDocGuard doc(htmlReadMemory(wrapped.c_str(), static_cast<int>(wrapped.size()), nullptr, "UTF-8",
+	                                HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return str;
@@ -69,7 +70,8 @@ static std::string DecodeHtmlEntities(const std::string &str) {
 				}
 				if (cur->children) {
 					xmlNodePtr found = findBody(cur->children);
-					if (found) return found;
+					if (found)
+						return found;
 				}
 			}
 		}
@@ -86,7 +88,7 @@ static std::string DecodeHtmlEntities(const std::string &str) {
 		return str;
 	}
 
-	std::string result(reinterpret_cast<char*>(content));
+	std::string result(reinterpret_cast<char *>(content));
 	xmlFree(content);
 	return result;
 }
@@ -233,13 +235,8 @@ OpenGraphResult ExtractOpenGraph(const std::string &html) {
 	}
 
 	// Parse HTML with libxml2
-	HtmlDocGuard doc(htmlReadMemory(
-		html.c_str(),
-		static_cast<int>(html.size()),
-		nullptr,
-		"UTF-8",
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	HtmlDocGuard doc(htmlReadMemory(html.c_str(), static_cast<int>(html.size()), nullptr, "UTF-8",
+	                                HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return result;
@@ -314,13 +311,8 @@ MetaTagsResult ExtractMetaTags(const std::string &html) {
 	}
 
 	// Parse HTML with libxml2
-	HtmlDocGuard doc(htmlReadMemory(
-		html.c_str(),
-		static_cast<int>(html.size()),
-		nullptr,
-		"UTF-8",
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	HtmlDocGuard doc(htmlReadMemory(html.c_str(), static_cast<int>(html.size()), nullptr, "UTF-8",
+	                                HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return result;

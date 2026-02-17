@@ -44,32 +44,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ExtensionHelper::TryAutoLoadExtension(db, "json");
 
 	// Register crawler_user_agent setting
-	config.AddExtensionOption("crawler_user_agent",
-	                          "User agent string for crawler HTTP requests",
-	                          LogicalType::VARCHAR,
+	config.AddExtensionOption("crawler_user_agent", "User agent string for crawler HTTP requests", LogicalType::VARCHAR,
 	                          Value("DuckDB-Crawler/1.0"));
 
 	// Register crawler_default_delay setting
-	config.AddExtensionOption("crawler_default_delay",
-	                          "Default crawl delay in seconds if not in robots.txt",
-	                          LogicalType::DOUBLE,
-	                          Value(1.0));
+	config.AddExtensionOption("crawler_default_delay", "Default crawl delay in seconds if not in robots.txt",
+	                          LogicalType::DOUBLE, Value(1.0));
 
 	// Register crawler_timeout_ms setting
-	config.AddExtensionOption("crawler_timeout_ms",
-	                          "HTTP request timeout in milliseconds",
-	                          LogicalType::BIGINT,
+	config.AddExtensionOption("crawler_timeout_ms", "HTTP request timeout in milliseconds", LogicalType::BIGINT,
 	                          Value::BIGINT(30000));
 
 	// Register crawler_respect_robots setting
-	config.AddExtensionOption("crawler_respect_robots",
-	                          "Whether to respect robots.txt directives",
-	                          LogicalType::BOOLEAN,
-	                          Value::BOOLEAN(true));
+	config.AddExtensionOption("crawler_respect_robots", "Whether to respect robots.txt directives",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	// Register crawler_max_response_bytes setting
-	config.AddExtensionOption("crawler_max_response_bytes",
-	                          "Maximum response body size in bytes (0 = unlimited)",
+	config.AddExtensionOption("crawler_max_response_bytes", "Maximum response body size in bytes (0 = unlimited)",
 	                          LogicalType::BIGINT,
 	                          Value::BIGINT(10485760)); // 10MB default
 
@@ -132,5 +123,4 @@ extern "C" {
 DUCKDB_CPP_EXTENSION_ENTRY(crawler, loader) {
 	duckdb::LoadInternal(loader);
 }
-
 }

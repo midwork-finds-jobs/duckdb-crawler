@@ -8,20 +8,24 @@ namespace duckdb {
 
 // Rules for a specific user-agent
 struct RobotsRules {
-	double crawl_delay = -1.0;   // -1 means not set
-	double request_rate = -1.0;  // Derived from Request-rate: n/m (m/n seconds per request)
+	double crawl_delay = -1.0;  // -1 means not set
+	double request_rate = -1.0; // Derived from Request-rate: n/m (m/n seconds per request)
 	std::vector<std::string> disallow;
 	std::vector<std::string> allow;
 
-	bool HasCrawlDelay() const { return crawl_delay >= 0 || request_rate >= 0; }
+	bool HasCrawlDelay() const {
+		return crawl_delay >= 0 || request_rate >= 0;
+	}
 
 	// Get effective delay (lower of crawl_delay or request_rate, if both set)
 	double GetEffectiveDelay() const {
 		if (crawl_delay >= 0 && request_rate >= 0) {
-			return std::max(crawl_delay, request_rate);  // Use stricter limit
+			return std::max(crawl_delay, request_rate); // Use stricter limit
 		}
-		if (crawl_delay >= 0) return crawl_delay;
-		if (request_rate >= 0) return request_rate;
+		if (crawl_delay >= 0)
+			return crawl_delay;
+		if (request_rate >= 0)
+			return request_rate;
 		return -1.0;
 	}
 };

@@ -8,8 +8,7 @@ namespace duckdb {
 // Helper: Convert string to lowercase
 static std::string ToLower(const std::string &str) {
 	std::string result = str;
-	std::transform(result.begin(), result.end(), result.begin(),
-	               [](unsigned char c) { return std::tolower(c); });
+	std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c) { return std::tolower(c); });
 	return result;
 }
 
@@ -75,8 +74,7 @@ static std::string ExtractAttribute(const std::string &tag, const std::string &a
 			// Unquoted value - read until whitespace or >
 			size_t value_start = eq_pos;
 			size_t value_end = value_start;
-			while (value_end < tag.length() &&
-			       !std::isspace(static_cast<unsigned char>(tag[value_end])) &&
+			while (value_end < tag.length() && !std::isspace(static_cast<unsigned char>(tag[value_end])) &&
 			       tag[value_end] != '>') {
 				value_end++;
 			}
@@ -250,9 +248,7 @@ std::string LinkParser::ResolveUrl(const std::string &base_url, const std::strin
 	size_t domain_start = proto_end + 3;
 	size_t path_start = base_url.find('/', domain_start);
 
-	std::string base_origin = (path_start != std::string::npos)
-	    ? base_url.substr(0, path_start)
-	    : base_url;
+	std::string base_origin = (path_start != std::string::npos) ? base_url.substr(0, path_start) : base_url;
 
 	// Absolute path (/path)
 	if (trimmed_href[0] == '/') {
@@ -260,9 +256,7 @@ std::string LinkParser::ResolveUrl(const std::string &base_url, const std::strin
 	}
 
 	// Relative path (path or ../path)
-	std::string base_path = (path_start != std::string::npos)
-	    ? base_url.substr(path_start)
-	    : "/";
+	std::string base_path = (path_start != std::string::npos) ? base_url.substr(path_start) : "/";
 
 	// Remove query string and fragment from base path
 	size_t query_pos = base_path.find('?');
@@ -293,8 +287,7 @@ std::vector<ExtractedLink> LinkParser::ExtractLinks(const std::string &html, con
 		// Find <a (case-insensitive)
 		size_t tag_start = std::string::npos;
 		for (size_t i = pos; i + 2 < html.length(); i++) {
-			if (html[i] == '<' &&
-			    (html[i + 1] == 'a' || html[i + 1] == 'A') &&
+			if (html[i] == '<' && (html[i + 1] == 'a' || html[i + 1] == 'A') &&
 			    (std::isspace(static_cast<unsigned char>(html[i + 2])) || html[i + 2] == '>')) {
 				tag_start = i;
 				break;
@@ -319,12 +312,8 @@ std::vector<ExtractedLink> LinkParser::ExtractLinks(const std::string &html, con
 			std::string lower_href = ToLower(href);
 
 			// Skip javascript:, mailto:, tel:, data:, #
-			if (lower_href.find("javascript:") != 0 &&
-			    lower_href.find("mailto:") != 0 &&
-			    lower_href.find("tel:") != 0 &&
-			    lower_href.find("data:") != 0 &&
-			    href[0] != '#') {
-
+			if (lower_href.find("javascript:") != 0 && lower_href.find("mailto:") != 0 &&
+			    lower_href.find("tel:") != 0 && lower_href.find("data:") != 0 && href[0] != '#') {
 				// Resolve to absolute URL
 				std::string absolute_url = ResolveUrl(base_url, href);
 

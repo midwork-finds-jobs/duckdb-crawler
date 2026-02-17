@@ -7,7 +7,7 @@ namespace duckdb {
 
 struct ExtractedLink {
 	std::string url;
-	bool nofollow;  // rel="nofollow" present
+	bool nofollow; // rel="nofollow" present
 };
 
 class LinkParser {

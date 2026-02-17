@@ -8,10 +8,11 @@ namespace duckdb {
 
 // Shared pipeline state for LIMIT pushdown across table function calls
 struct PipelineState {
-    std::atomic<int64_t> remaining;
-    std::atomic<bool> stopped;
+	std::atomic<int64_t> remaining;
+	std::atomic<bool> stopped;
 
-    PipelineState(int64_t limit) : remaining(limit), stopped(false) {}
+	PipelineState(int64_t limit) : remaining(limit), stopped(false) {
+	}
 };
 
 // Initialize pipeline limit for a database instance (call before running query)

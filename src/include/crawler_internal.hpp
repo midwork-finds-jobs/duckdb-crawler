@@ -29,19 +29,19 @@ struct BatchCrawlEntry {
 	std::string body;
 	std::string content_type;
 	int64_t elapsed_ms;
-	std::string timestamp_expr;  // SQL expression for timestamp
+	std::string timestamp_expr; // SQL expression for timestamp
 	std::string error;
 	std::string etag;
 	std::string last_modified;
 	std::string content_hash;
-	std::string final_url;       // Final URL after redirects
-	int redirect_count;          // Number of redirects followed
+	std::string final_url; // Final URL after redirects
+	int redirect_count;    // Number of redirects followed
 	// Structured data extraction
-	std::string jsonld;          // JSON-LD data as JSON
-	std::string opengraph;       // OpenGraph data as JSON
-	std::string meta;            // Meta tags as JSON
-	std::string hydration;       // Hydration data as JSON
-	std::string js;              // JavaScript variables as JSON
+	std::string jsonld;    // JSON-LD data as JSON
+	std::string opengraph; // OpenGraph data as JSON
+	std::string meta;      // Meta tags as JSON
+	std::string hydration; // Hydration data as JSON
+	std::string js;        // JavaScript variables as JSON
 	bool is_update;
 };
 

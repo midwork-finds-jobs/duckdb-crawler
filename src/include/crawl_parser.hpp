@@ -12,7 +12,7 @@ namespace duckdb {
 // Single MERGE action (UPDATE, DELETE, or INSERT with optional condition)
 struct CrawlingMergeAction {
 	MergeActionType action_type = MergeActionType::MERGE_INSERT;
-	unique_ptr<ParsedExpression> condition;  // Optional AND condition
+	unique_ptr<ParsedExpression> condition; // Optional AND condition
 	InsertColumnOrder column_order = InsertColumnOrder::INSERT_BY_POSITION;
 
 	// For UPDATE: SET clauses

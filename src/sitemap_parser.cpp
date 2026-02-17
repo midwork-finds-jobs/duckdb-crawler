@@ -5,7 +5,8 @@
 namespace duckdb {
 
 // Simple XML tag extraction helper
-static std::string ExtractTagContent(const std::string &xml, const std::string &tag, size_t start_pos, size_t &end_pos) {
+static std::string ExtractTagContent(const std::string &xml, const std::string &tag, size_t start_pos,
+                                     size_t &end_pos) {
 	std::string open_tag = "<" + tag + ">";
 	std::string close_tag = "</" + tag + ">";
 
@@ -117,21 +118,10 @@ SitemapData SitemapParser::Parse(const std::string &xml_content) {
 }
 
 std::vector<std::string> SitemapParser::GetCommonSitemapPaths() {
-	return {
-	    "/sitemap.xml",
-	    "/sitemap_index.xml",
-	    "/sitemap-index.xml",
-	    "/sitemapindex.xml",
-	    "/sitemap/sitemap.xml",
-	    "/sitemaps/sitemap.xml",
-	    "/sitemap1.xml",
-	    "/sitemap-1.xml",
-	    "/post-sitemap.xml",
-	    "/page-sitemap.xml",
-	    "/product-sitemap.xml",
-	    "/category-sitemap.xml",
-	    "/wp-sitemap.xml"
-	};
+	return {"/sitemap.xml",         "/sitemap_index.xml",    "/sitemap-index.xml",   "/sitemapindex.xml",
+	        "/sitemap/sitemap.xml", "/sitemaps/sitemap.xml", "/sitemap1.xml",        "/sitemap-1.xml",
+	        "/post-sitemap.xml",    "/page-sitemap.xml",     "/product-sitemap.xml", "/category-sitemap.xml",
+	        "/wp-sitemap.xml"};
 }
 
 std::vector<std::string> SitemapParser::ExtractSitemapsFromRobotsTxt(const std::string &robots_content) {

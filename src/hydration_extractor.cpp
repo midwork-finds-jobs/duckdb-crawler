@@ -11,14 +11,20 @@ using namespace duckdb_yyjson;
 // RAII wrapper for xmlDoc
 class HydrationDocGuard {
 public:
-	explicit HydrationDocGuard(xmlDocPtr doc) : doc_(doc) {}
+	explicit HydrationDocGuard(xmlDocPtr doc) : doc_(doc) {
+	}
 	~HydrationDocGuard() {
 		if (doc_) {
 			xmlFreeDoc(doc_);
 		}
 	}
-	xmlDocPtr get() const { return doc_; }
-	operator bool() const { return doc_ != nullptr; }
+	xmlDocPtr get() const {
+		return doc_;
+	}
+	operator bool() const {
+		return doc_ != nullptr;
+	}
+
 private:
 	xmlDocPtr doc_;
 };
@@ -29,7 +35,7 @@ static std::string GetAttribute(xmlNodePtr node, const char *attr) {
 	if (!value) {
 		return "";
 	}
-	std::string result(reinterpret_cast<char*>(value));
+	std::string result(reinterpret_cast<char *>(value));
 	xmlFree(value);
 	return result;
 }
@@ -108,26 +114,15 @@ static std::string ExtractJsonObject(const std::string &content, size_t start_po
 
 // Known hydration patterns to look for in JavaScript
 static const std::vector<std::string> HYDRATION_PATTERNS = {
-	"__NEXT_DATA__",
-	"__NUXT__",
-	"__INITIAL_STATE__",
-	"__PRELOADED_STATE__",
-	"__DATA__",
-	"__APOLLO_STATE__",
-	"__RELAY_STORE__",
-	"__REDUX_STATE__"
-};
+    "__NEXT_DATA__", "__NUXT__",         "__INITIAL_STATE__", "__PRELOADED_STATE__",
+    "__DATA__",      "__APOLLO_STATE__", "__RELAY_STORE__",   "__REDUX_STATE__"};
 
 // Extract hydration data from script content (JavaScript assignments)
 static void ExtractFromScriptContent(const std::string &content, HydrationResult &result) {
 	for (const auto &pattern : HYDRATION_PATTERNS) {
 		// Look for window.VAR = or VAR = followed by JSON
-		std::vector<std::string> prefixes = {
-			"window." + pattern + " = ",
-			"window." + pattern + "=",
-			pattern + " = ",
-			pattern + "="
-		};
+		std::vector<std::string> prefixes = {"window." + pattern + " = ", "window." + pattern + "=", pattern + " = ",
+		                                     pattern + "="};
 
 		for (const auto &prefix : prefixes) {
 			size_t pos = content.find(prefix);
@@ -159,7 +154,7 @@ static void FindHydrationScripts(xmlNodePtr node, HydrationResult &result) {
 							// Get content
 							xmlChar *content = xmlNodeGetContent(cur);
 							if (content) {
-								std::string content_str(reinterpret_cast<char*>(content));
+								std::string content_str(reinterpret_cast<char *>(content));
 								xmlFree(content);
 
 								// Trim and validate
@@ -183,7 +178,7 @@ static void FindHydrationScripts(xmlNodePtr node, HydrationResult &result) {
 				if (type.empty() || StringUtil::Lower(type) == "text/javascript") {
 					xmlChar *content = xmlNodeGetContent(cur);
 					if (content) {
-						std::string content_str(reinterpret_cast<char*>(content));
+						std::string content_str(reinterpret_cast<char *>(content));
 						xmlFree(content);
 						ExtractFromScriptContent(content_str, result);
 					}
@@ -246,13 +241,8 @@ HydrationResult ExtractHydration(const std::string &html) {
 	}
 
 	// Parse HTML with libxml2
-	HydrationDocGuard doc(htmlReadMemory(
-		html.c_str(),
-		static_cast<int>(html.size()),
-		nullptr,
-		"UTF-8",
-		HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING
-	));
+	HydrationDocGuard doc(htmlReadMemory(html.c_str(), static_cast<int>(html.size()), nullptr, "UTF-8",
+	                                     HTML_PARSE_RECOVER | HTML_PARSE_NOERROR | HTML_PARSE_NOWARNING));
 
 	if (!doc) {
 		return result;

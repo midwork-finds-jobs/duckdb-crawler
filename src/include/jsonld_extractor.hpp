@@ -8,8 +8,8 @@ namespace duckdb {
 
 // Represents a single JSON-LD object with its @type
 struct JsonLdObject {
-	std::string type;      // @type value (e.g., "Product", "Organization")
-	std::string json;      // Full JSON string of the object
+	std::string type; // @type value (e.g., "Product", "Organization")
+	std::string json; // Full JSON string of the object
 };
 
 // Result of JSON-LD extraction
