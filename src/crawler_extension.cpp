@@ -97,7 +97,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ParserExtension parser_ext;
 	parser_ext.parse_function = CrawlParserExtension::ParseCrawl;
 	parser_ext.plan_function = CrawlParserExtension::PlanCrawl;
-	config.parser_extensions.push_back(std::move(parser_ext));
+	ParserExtension::Register(config, std::move(parser_ext));
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {

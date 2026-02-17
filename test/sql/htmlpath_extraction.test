@@ -1,6 +1,6 @@
 # name: test/sql/htmlpath_extraction.test
 # description: Test htmlpath() and jq() extraction functions
-# group: [crawler]
+# group: [sql]
 
 require crawler
 
