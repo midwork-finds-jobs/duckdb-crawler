@@ -1,0 +1,23 @@
+# name: test/sql/timeout_deadline.test
+# description: SET crawler_timeout_ms is milliseconds and is session-visible
+# group: [crawler]
+# hang/deadline behavior is covered by rust_parser sitemap + ffi timeout tests
+# read_html/crawl/sitemap bind+execute re-read this setting via GetCrawlerTimeoutMs
+
+require crawler
+
+statement ok
+SET crawler_timeout_ms = 2000;
+
+query I
+SELECT current_setting('crawler_timeout_ms');
+----
+2000
+
+statement ok
+RESET crawler_timeout_ms;
+
+query I
+SELECT current_setting('crawler_timeout_ms');
+----
+30000

@@ -110,10 +110,12 @@ static void StreamIntoFunction(ClientContext &context, TableFunctionInput &data,
         if (!check_chunk || check_chunk->size() == 0) {
             // Create table with columns from query result
             string create_sql = "CREATE TABLE " + QuoteSqlIdentifier(bind_data.target_table) + " (";
-            for (idx_t i = 0; i < query_result->names.size(); i++) {
+            auto &result_names = query_result->GetNames();
+            auto &result_types = query_result->GetTypes();
+            for (idx_t i = 0; i < result_names.size(); i++) {
                 if (i > 0) create_sql += ", ";
-                create_sql += QuoteSqlIdentifier(query_result->names[i]) + " " +
-                              query_result->types[i].ToString();
+                create_sql += QuoteSqlIdentifier(result_names[i].GetIdentifierName()) + " " +
+                              result_types[i].ToString();
             }
             create_sql += ")";
             conn.Query(create_sql);

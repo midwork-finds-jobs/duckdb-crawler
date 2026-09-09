@@ -5,3 +5,6 @@ duckdb_extension_load(crawler
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
 )
+
+# page_info.test uses json_keys / -> / ->>
+duckdb_extension_load(json)

@@ -1,5 +1,6 @@
 build/
 .cache/
+vcpkg/
 rust_parser/target/
 *.duckdb
 *.wal

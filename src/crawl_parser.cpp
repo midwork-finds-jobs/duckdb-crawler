@@ -238,13 +238,14 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 static void ExtractJoinColumns(ParsedExpression *expr, vector<string> &columns) {
 	if (!expr) return;
 
-	if (expr->type == ExpressionType::COLUMN_REF) {
+	if (expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
-		if (!col_ref.column_names.empty()) {
-			columns.push_back(col_ref.column_names.back());
+		auto &cnames = col_ref.column_names;
+		if (!cnames.empty()) {
+			columns.push_back(cnames.back());
 		}
-	} else if (expr->type == ExpressionType::COMPARE_EQUAL ||
-	           expr->type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+	} else if (expr->GetExpressionType() == ExpressionType::COMPARE_EQUAL ||
+	           expr->GetExpressionType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
 		auto &comp = expr->Cast<ComparisonExpression>();
 		ExtractJoinColumns(comp.left.get(), columns);
 		ExtractJoinColumns(comp.right.get(), columns);
@@ -252,7 +253,7 @@ static void ExtractJoinColumns(ParsedExpression *expr, vector<string> &columns) 
 }
 
 static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
-	string trimmed = Trim(query);
+	auto trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
 
 	// Check for "CRAWLING MERGE INTO"
@@ -315,7 +316,9 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	data->target = merge_stmt.target->Copy();
 	data->source = merge_stmt.source->Copy();
 	data->join_condition = merge_stmt.join_condition ? merge_stmt.join_condition->Copy() : nullptr;
-	data->using_columns = merge_stmt.using_columns;
+	for (auto &col : merge_stmt.using_columns) {
+		data->using_columns.push_back(col);
+	}
 	data->row_limit = row_limit;
 
 	// Extract join columns from condition for UPDATE BY NAME exclusion
@@ -331,12 +334,16 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 			stream_action.action_type = action->action_type;
 			stream_action.condition = action->condition ? action->condition->Copy() : nullptr;
 			stream_action.column_order = action->column_order;
-			stream_action.insert_columns = action->insert_columns;
+			for (auto &col : action->insert_columns) {
+				stream_action.insert_columns.push_back(col);
+			}
 			for (auto &expr : action->expressions) {
 				stream_action.insert_expressions.push_back(expr->Copy());
 			}
 			if (action->update_info) {
-				stream_action.set_columns = action->update_info->columns;
+				for (auto &col : action->update_info->columns) {
+					stream_action.set_columns.push_back(col);
+				}
 				for (auto &expr : action->update_info->expressions) {
 					stream_action.set_expressions.push_back(expr->Copy());
 				}
@@ -380,18 +387,16 @@ CrawlParserExtension::CrawlParserExtension() {
 }
 
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
-	// Only handle CRAWLING MERGE INTO statements
-	// Table functions (crawl, crawl_url, htmlpath) are registered separately
-	string trimmed = Trim(query);
-	string lower = StringUtil::Lower(trimmed);
-
-	// Handle CRAWLING MERGE INTO (uses DuckDB's MERGE parser)
-	if (StringUtil::StartsWith(lower, "crawling merge into")) {
-		return ParseCrawlingMerge(trimmed);
+	(void)info;
+	auto trimmed = Trim(query);
+	if (trimmed.empty()) {
+		return ParserExtensionParseResult();
 	}
-
-	// Not a statement we handle, let default parser handle it
-	return ParserExtensionParseResult();
+	auto lower = StringUtil::Lower(trimmed);
+	if (!StringUtil::StartsWith(lower, "crawling merge into")) {
+		return ParserExtensionParseResult();
+	}
+	return ParseCrawlingMerge(trimmed);
 }
 
 ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *info, ClientContext &context,

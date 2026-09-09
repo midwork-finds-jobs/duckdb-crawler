@@ -47,3 +47,24 @@ WHERE Building IS NOT NULL;
 ----
 true
 
+# Issue #3: duplicate header names must bind uniquely (no Binder Error on duplicates)
+statement ok
+SELECT *
+FROM read_html(
+  'https://simple.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)_per_capita',
+  'table.wikitable',
+  1
+)
+LIMIT 1;
+
+# Bound column names are unique after sanitization / _N suffixing
+query I
+SELECT count(column_name) = count(DISTINCT column_name)
+FROM (DESCRIBE SELECT * FROM read_html(
+  'https://simple.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)_per_capita',
+  'table.wikitable',
+  1
+));
+----
+true
+

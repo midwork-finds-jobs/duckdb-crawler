@@ -454,6 +454,7 @@ struct CrawlBindData : public TableFunctionData {
     string state_table;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;  // named timeout := N (seconds)
     int batch_size = 10;  // URLs per Rust batch
     int concurrency = 4;  // Concurrent requests in Rust
     int delay_ms = 0;     // Min delay between requests to same domain
@@ -635,9 +636,7 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
     if (context.TryGetCurrentSetting("crawler_default_delay", setting_value)) {
         bind_data->delay_ms = static_cast<int>(setting_value.GetValue<double>() * 1000);
     }
-    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
-        bind_data->timeout_ms = static_cast<int>(setting_value.GetValue<int64_t>());
-    }
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
     if (context.TryGetCurrentSetting("crawler_respect_robots", setting_value)) {
         bind_data->respect_robots = setting_value.GetValue<bool>();
     }
@@ -675,6 +674,7 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "workers") {
             bind_data->concurrency = kv.second.GetValue<int>();
         } else if (kv.first == "batch_size") {
@@ -774,6 +774,10 @@ static unique_ptr<GlobalTableFunctionState> CrawlInitGlobal(ClientContext &conte
 static void CrawlFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
     auto &bind_data = data.bind_data->CastNoConst<CrawlBindData>();
     auto &state = data.global_state->Cast<CrawlGlobalState>();
+    int timeout_ms = bind_data.timeout_explicit ? bind_data.timeout_ms : GetCrawlerTimeoutMs(context);
+    if (timeout_ms < 1) {
+        timeout_ms = 1;
+    }
 
     // Initialize on first call
     if (!state.initialized) {
@@ -927,7 +931,7 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
                 {url_to_fetch},
                 "{}",  // No extraction specs
                 bind_data.user_agent,
-                bind_data.timeout_ms,
+                timeout_ms,
                 1,  // Single URL, single concurrency
                 bind_data.delay_ms,
                 bind_data.respect_robots,
@@ -974,6 +978,10 @@ static unique_ptr<LocalTableFunctionState> CrawlLateralInitLocal(ExecutionContex
 static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInput &data,
                                       DataChunk &input, DataChunk &output) {
     auto &bind_data = data.bind_data->CastNoConst<CrawlBindData>();
+    int timeout_ms = bind_data.timeout_explicit ? bind_data.timeout_ms : GetCrawlerTimeoutMs(context.client);
+    if (timeout_ms < 1) {
+        timeout_ms = 1;
+    }
 
     if (input.size() == 0) {
         return OperatorResultType::NEED_MORE_INPUT;
@@ -1011,7 +1019,7 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
         yyjson_mut_obj_add_val(doc, root, "urls", urls_arr);
 
         yyjson_mut_obj_add_strcpy(doc, root, "user_agent", bind_data.user_agent.c_str());
-        yyjson_mut_obj_add_uint(doc, root, "timeout_ms", bind_data.timeout_ms);
+        yyjson_mut_obj_add_uint(doc, root, "timeout_ms", timeout_ms);
         yyjson_mut_obj_add_uint(doc, root, "concurrency", 1);
 
         size_t len = 0;

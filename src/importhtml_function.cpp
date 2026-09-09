@@ -2,11 +2,13 @@
 // Similar to Google Sheets =IMPORTHTML() - extracts tables from web pages
 
 #include "importhtml_function.hpp"
+#include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include <set>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -29,6 +31,7 @@ struct ReadHtmlBindData : public TableFunctionData {
     size_t table_index = 0;  // 0-based index of which matching table to extract
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;
 
     // Extracted table data (populated during bind)
     vector<string> headers;
@@ -38,6 +41,35 @@ struct ReadHtmlBindData : public TableFunctionData {
     idx_t num_rows = 0;
     string error;
 };
+
+// Sanitize a header for SQL identifiers, then ensure uniqueness within the table.
+// First occurrence keeps the base name; later collisions become base_1, base_2, ...
+static string SanitizeHeaderName(const string &header, idx_t fallback_idx) {
+    string col_name = header;
+    StringUtil::Trim(col_name);
+    if (col_name.empty()) {
+        col_name = "column" + std::to_string(fallback_idx);
+    }
+    for (auto &c : col_name) {
+        if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
+            c = '_';
+        }
+    }
+    return col_name;
+}
+
+static string MakeUniqueColumnName(const string &base, unordered_set<string> &used) {
+    auto canonical = StringUtil::Lower(base);
+    if (used.insert(canonical).second) {
+        return base;
+    }
+    for (idx_t i = 1;; i++) {
+        string candidate = base + "_" + std::to_string(i);
+        if (used.insert(StringUtil::Lower(candidate)).second) {
+            return candidate;
+        }
+    }
+}
 
 //===--------------------------------------------------------------------===//
 // Global State
@@ -493,13 +525,20 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
         bind_data->table_index = static_cast<size_t>(idx - 1);  // Convert to 0-based
     }
 
+    // Session SET crawler_timeout_ms (ms). Named timeout stays seconds.
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
+
     // Named parameters
     for (auto &kv : input.named_parameters) {
         if (kv.first == "user_agent") {
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         }
+    }
+    if (bind_data->timeout_ms < 1) {
+        bind_data->timeout_ms = 1;
     }
 
     // Fetch and extract table during bind to determine schema
@@ -516,19 +555,12 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
     // Infer column types based on data
     InferColumnTypes(*bind_data);
 
-    // Define columns based on extracted headers and inferred types
+    // Define columns based on extracted headers and inferred types.
+    // Deduplicate after sanitization so binder never sees duplicate names (issue #3).
+    unordered_set<string> used_names;
     for (idx_t i = 0; i < bind_data->headers.size(); i++) {
-        // Sanitize header name for SQL compatibility
-        string col_name = bind_data->headers[i];
-        if (col_name.empty()) {
-            col_name = "column" + std::to_string(names.size() + 1);
-        }
-        // Replace spaces and special chars with underscores
-        for (auto &c : col_name) {
-            if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
-                c = '_';
-            }
-        }
+        string col_name = SanitizeHeaderName(bind_data->headers[i], names.size() + 1);
+        col_name = MakeUniqueColumnName(col_name, used_names);
         names.push_back(col_name);
 
         // Use inferred type

@@ -3,6 +3,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 
@@ -16,11 +17,12 @@ using namespace duckdb_yyjson;
 
 struct SitemapBindData : public TableFunctionData {
     string url;
-    bool recursive = true;
+    bool recursive = false;
     int max_depth = 5;
     bool discover_from_robots = false;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;
     string filter_pattern;
 };
 
@@ -148,6 +150,8 @@ static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
         throw BinderException("sitemap() requires a URL argument");
     }
 
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
+
     // Named parameters
     for (auto &kv : input.named_parameters) {
         if (kv.first == "recursive") {
@@ -160,6 +164,7 @@ static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "filter") {
             bind_data->filter_pattern = StringValue::Get(kv.second);
         }
@@ -195,11 +200,17 @@ static unique_ptr<GlobalTableFunctionState> SitemapInitGlobal(ClientContext &con
 //===--------------------------------------------------------------------===//
 
 static void SitemapFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-    auto &bind_data = data.bind_data->Cast<SitemapBindData>();
+    auto &bind_data = data.bind_data->CastNoConst<SitemapBindData>();
     auto &state = data.global_state->Cast<SitemapGlobalState>();
 
     // Fetch sitemap on first call
     if (!state.fetched) {
+        if (!bind_data.timeout_explicit) {
+            bind_data.timeout_ms = GetCrawlerTimeoutMs(context);
+        }
+        if (bind_data.timeout_ms < 1) {
+            bind_data.timeout_ms = 1;
+        }
         string request_json = BuildSitemapRequest(bind_data);
         string response_json = FetchSitemapWithRust(request_json);
         state.entries = ParseSitemapResponse(response_json, bind_data.filter_pattern);

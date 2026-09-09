@@ -57,7 +57,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register crawler_timeout_ms setting
 	config.AddExtensionOption("crawler_timeout_ms",
-	                          "HTTP request timeout in milliseconds",
+	                          "Hard HTTP deadline for crawl()/crawl_url()/sitemap() in milliseconds. "
+	                          "Named timeout parameter is seconds.",
 	                          LogicalType::BIGINT,
 	                          Value::BIGINT(30000));
 
@@ -102,10 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		SetInterrupted(false);
 	}
 
-	// Register CRAWL and STREAM parser extension
-	// Disabled: parser_extensions made private in DuckDB 1.2+
-	// Use crawl()/crawl_url() table functions instead
-	(void)config;
+	// CRAWLING MERGE INTO — PEG treats the leading identifier as an
+	// ExpressionStatement and fails at MERGE. parse_function claims the tokens.
+	config.parser_extensions.push_back(CrawlParserExtension());
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {

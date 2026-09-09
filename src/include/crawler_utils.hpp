@@ -5,6 +5,11 @@
 
 namespace duckdb {
 
+class ClientContext;
+
+// Session SET crawler_timeout_ms (milliseconds). Named TVF timeout is seconds.
+int GetCrawlerTimeoutMs(ClientContext &context);
+
 //===--------------------------------------------------------------------===//
 // Error Classification
 //===--------------------------------------------------------------------===//

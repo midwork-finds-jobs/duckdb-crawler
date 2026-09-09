@@ -1042,6 +1042,9 @@ fn extract_table_element(table: scraper::ElementRef, is_wikipedia: bool) -> Tabl
         headers.push(format!("column{}", headers.len() + 1));
     }
 
+    // Deterministic uniqueness: first keeps base name, later get _1, _2, ...
+    headers = uniquify_headers(headers);
+
     let num_rows = rows.len();
 
     TableExtractionResult {
@@ -1051,6 +1054,35 @@ fn extract_table_element(table: scraper::ElementRef, is_wikipedia: bool) -> Tabl
         num_rows,
         error: None,
     }
+}
+
+/// Make header names unique. First occurrence keeps the base name;
+/// subsequent collisions become `base_1`, `base_2`, ...
+fn uniquify_headers(headers: Vec<String>) -> Vec<String> {
+    use std::collections::HashSet;
+    let mut used: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(headers.len());
+    for header in headers {
+        let base = if header.is_empty() {
+            "column".to_string()
+        } else {
+            header
+        };
+        if used.insert(base.clone()) {
+            out.push(base);
+            continue;
+        }
+        let mut i = 1u32;
+        loop {
+            let candidate = format!("{}_{}", base, i);
+            if used.insert(candidate.clone()) {
+                out.push(candidate);
+                break;
+            }
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Normalize cell text: trim whitespace, collapse multiple spaces/newlines
@@ -1175,7 +1207,7 @@ mod tests {
         let jsonld = extract_jsonld_objects(&document);
 
         assert!(jsonld.contains_key("Product"));
-        let product = &jsonld["Product"];
+        let product = jsonld["Product"].as_array().unwrap().first().unwrap();
         assert_eq!(product["name"], "Test Product");
         assert_eq!(product["offers"]["price"], "19.99");
     }
@@ -1521,6 +1553,54 @@ fn test_extract_table_basic() {
     assert_eq!(result.num_rows, 2);
     assert_eq!(result.rows[0], vec!["Item 1", "100"]);
     assert_eq!(result.rows[1], vec!["Item 2", "200"]);
+}
+
+#[test]
+fn test_uniquify_headers_duplicates() {
+    assert_eq!(
+        uniquify_headers(vec![
+            "Estimate".to_string(),
+            "Year".to_string(),
+            "Estimate".to_string(),
+            "Estimate".to_string(),
+        ]),
+        vec!["Estimate", "Year", "Estimate_1", "Estimate_2"]
+    );
+    // Pre-existing _1 suffix still gets a free unique name
+    assert_eq!(
+        uniquify_headers(vec![
+            "Estimate".to_string(),
+            "Estimate_1".to_string(),
+            "Estimate".to_string(),
+        ]),
+        vec!["Estimate", "Estimate_1", "Estimate_2"]
+    );
+}
+
+#[test]
+fn test_extract_table_duplicate_headers() {
+    let html = r#"
+    <html>
+    <body>
+        <table id="gdp">
+            <thead>
+                <tr><th>Country</th><th>Estimate</th><th>Year</th><th>Estimate</th></tr>
+            </thead>
+            <tbody>
+                <tr><td>A</td><td>1</td><td>2020</td><td>2</td></tr>
+            </tbody>
+        </table>
+    </body>
+    </html>
+    "#;
+
+    let result = extract_table(html, "table#gdp", false, 0);
+    assert!(result.error.is_none());
+    assert_eq!(
+        result.headers,
+        vec!["Country", "Estimate", "Year", "Estimate_1"]
+    );
+    assert_eq!(result.rows[0], vec!["A", "1", "2020", "2"]);
 }
 
 #[test]

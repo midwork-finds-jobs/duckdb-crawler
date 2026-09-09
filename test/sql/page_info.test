@@ -4,9 +4,11 @@
 
 require crawler
 
+require json
+
 # Test page_info() returns JSON with expected keys
 query I
-SELECT json_array_length(json_keys(page_info(
+SELECT len(json_keys(page_info(
     '<html><head><meta name="description" content="Test"></head><body><h1>Hello</h1><p>Text</p></body></html>',
     'http://example.com'
 )));
@@ -87,10 +89,10 @@ SELECT (page_info(
 
 # Test page_info() readability has title key
 query I
-SELECT page_info(
+SELECT (page_info(
     '<html><body><article><p>Hello world</p></article></body></html>',
     'http://example.com'
-)->'readability'->>'title' IS NOT NULL;
+)->'readability'->>'title') IS NOT NULL;
 ----
 true
 

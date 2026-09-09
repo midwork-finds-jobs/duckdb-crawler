@@ -531,7 +531,10 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 	}
 
 	// Get column names and types from result
-	vector<string> col_names = query_result->names;
+	vector<string> col_names;
+	for (auto &name : query_result->names) {
+		col_names.push_back(name);
+	}
 	vector<LogicalType> col_types = query_result->types;
 
 	// Collect all chunks first to know total (enables progress bar)

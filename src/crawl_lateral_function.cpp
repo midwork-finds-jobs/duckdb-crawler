@@ -334,6 +334,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
 struct CrawlUrlBindData : public TableFunctionData {
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;  // named timeout := N (seconds)
     bool use_cache = true;      // Enable HTTP response caching
     int cache_ttl_hours = 24;   // Cache TTL in hours
     int64_t max_results = -1;   // Max results to return (-1 = unlimited)
@@ -510,9 +511,7 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
     if (context.TryGetCurrentSetting("crawler_user_agent", setting_value)) {
         bind_data->user_agent = setting_value.ToString();
     }
-    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
-        bind_data->timeout_ms = static_cast<int>(setting_value.GetValue<int64_t>());
-    }
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
 
     // Check for optional second positional argument (max_results)
     // This enables LIMIT pushdown in LATERAL joins where named params don't work
@@ -526,6 +525,7 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "cache") {
             bind_data->use_cache = kv.second.GetValue<bool>();
         } else if (kv.first == "cache_ttl") {
@@ -689,8 +689,13 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
 
         // Crawl if not in cache
         if (!from_cache) {
+            int timeout_ms = bind_data.timeout_explicit ? bind_data.timeout_ms
+                                                        : GetCrawlerTimeoutMs(context.client);
+            if (timeout_ms < 1) {
+                timeout_ms = 1;
+            }
             result = CrawlSingleUrl(url, "{}",  // No extraction specs
-                                    bind_data.user_agent, bind_data.timeout_ms);
+                                    bind_data.user_agent, timeout_ms);
 
             // Save to cache
             if (bind_data.use_cache) {
