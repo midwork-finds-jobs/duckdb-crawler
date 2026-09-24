@@ -4,7 +4,8 @@ use crate::extractors::{extract_all, ExtractionRequest};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 // Global interrupt flag for graceful shutdown
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -688,8 +689,86 @@ fn extract_domain(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Per-domain rate limiter
-type DomainRateLimiter = Arc<Mutex<HashMap<String, std::time::Instant>>>;
+const MAX_BACKOFF_SECS: u64 = 600;
+
+struct DomainLimitState {
+    next_allowed: Instant,
+    blocked_until: Option<Instant>,
+    consecutive_429s: u32,
+}
+
+impl DomainLimitState {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_allowed: now,
+            blocked_until: None,
+            consecutive_429s: 0,
+        }
+    }
+
+    fn gate(&self) -> Instant {
+        self.blocked_until.map_or(self.next_allowed, |until| until.max(self.next_allowed))
+    }
+}
+
+type DomainRateLimiter = Arc<Mutex<HashMap<String, DomainLimitState>>>;
+
+fn global_rate_limiter() -> DomainRateLimiter {
+    static LIMITER: OnceLock<DomainRateLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
+
+fn fib_backoff_secs(attempt: u32) -> u64 {
+    let mut previous = 0u64;
+    let mut current = 1u64;
+    for _ in 1..attempt {
+        let next = previous.saturating_add(current);
+        previous = current;
+        current = next.min(MAX_BACKOFF_SECS);
+    }
+    current.min(MAX_BACKOFF_SECS)
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+async fn acquire_domain(limiter: &DomainRateLimiter, domain: &str, delay: Duration) {
+    let wait = {
+        let mut domains = limiter.lock().await;
+        let now = Instant::now();
+        let state = domains
+            .entry(domain.to_string())
+            .or_insert_with(|| DomainLimitState::new(now));
+        let ready_at = state.gate();
+        state.next_allowed = ready_at.max(now) + delay;
+        ready_at.saturating_duration_since(now)
+    };
+    if !wait.is_zero() {
+        tokio::time::sleep(wait).await;
+    }
+}
+
+async fn note_429(limiter: &DomainRateLimiter, domain: &str, retry_after: Option<Duration>) {
+    let mut domains = limiter.lock().await;
+    let now = Instant::now();
+    let state = domains
+        .entry(domain.to_string())
+        .or_insert_with(|| DomainLimitState::new(now));
+    state.consecutive_429s = state.consecutive_429s.saturating_add(1);
+    let backoff = retry_after.unwrap_or_else(|| Duration::from_secs(fib_backoff_secs(state.consecutive_429s)));
+    let until = now + backoff.min(Duration::from_secs(MAX_BACKOFF_SECS));
+    state.blocked_until = Some(until);
+    state.next_allowed = state.next_allowed.max(until);
+}
+
+async fn note_success(limiter: &DomainRateLimiter, domain: &str) {
+    let mut domains = limiter.lock().await;
+    if let Some(state) = domains.get_mut(domain) {
+        state.blocked_until = None;
+        state.consecutive_429s = 0;
+    }
+}
 
 /// Single crawl result
 #[derive(Debug, serde::Serialize)]
@@ -718,36 +797,11 @@ async fn fetch_and_extract(
     rate_limiter: &DomainRateLimiter,
     delay_ms: u64,
 ) -> CrawlResult {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let domain = extract_domain(&url);
 
-    // Apply per-domain rate limiting
-    if delay_ms > 0 {
-        let domain = extract_domain(&url);
-        let delay = Duration::from_millis(delay_ms);
-
-        let wait_time = {
-            let limiter = rate_limiter.lock().await;
-            if let Some(last_access) = limiter.get(&domain) {
-                let elapsed = last_access.elapsed();
-                if elapsed < delay {
-                    Some(delay - elapsed)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(wait) = wait_time {
-            tokio::time::sleep(wait).await;
-        }
-
-        // Update last access time
-        {
-            let mut limiter = rate_limiter.lock().await;
-            limiter.insert(domain, std::time::Instant::now());
-        }
+    if !domain.is_empty() {
+        acquire_domain(rate_limiter, &domain, Duration::from_millis(delay_ms)).await;
     }
 
     match client.get(&url).send().await {
@@ -761,8 +815,32 @@ async fn fetch_and_extract(
                 .unwrap_or("")
                 .to_string();
 
+            if status == 429 {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after);
+                if !domain.is_empty() {
+                    note_429(rate_limiter, &domain, retry_after).await;
+                }
+                return CrawlResult {
+                    url,
+                    final_url,
+                    status,
+                    content_type,
+                    body: String::new(),
+                    error: Some("HTTP 429 Too Many Requests".to_string()),
+                    extracted: None,
+                    response_time_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+
             match response.text().await {
                 Ok(body) => {
+                    if (200..400).contains(&status) && !domain.is_empty() {
+                        note_success(rate_limiter, &domain).await;
+                    }
                     let extracted = if let Some(req) = extraction {
                         let result = extract_all(&body, req);
                         // Convert HashMap to JSON Value
@@ -897,7 +975,7 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         let delay_ms = request.delay_ms;
         let respect_robots = request.respect_robots;
         let user_agent = request.user_agent.clone();
-        let rate_limiter: DomainRateLimiter = Arc::new(Mutex::new(HashMap::new()));
+        let rate_limiter = global_rate_limiter();
 
         // Filter URLs by robots.txt if enabled
         let urls: Vec<String> = if respect_robots {
@@ -1199,5 +1277,55 @@ pub unsafe extern "C" fn extract_hydration_ffi(
             json_ptr: ptr::null_mut(),
             error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
         },
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    fn local_limiter() -> DomainRateLimiter {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn backoff_is_fibonacci_and_capped() {
+        let sequence: Vec<u64> = (1..=8).map(fib_backoff_secs).collect();
+        assert_eq!(sequence, vec![1, 1, 2, 3, 5, 8, 13, 21]);
+        assert_eq!(fib_backoff_secs(50), MAX_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_seconds_only() {
+        assert_eq!(parse_retry_after(" 120 "), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after("not-a-delay"), None);
+    }
+
+    #[test]
+    fn concurrent_crawls_reserve_separate_slots() {
+        let limiter = local_limiter();
+        let delay = Duration::from_millis(100);
+        let start = Instant::now();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (first, second) = futures::join!(
+                acquire_domain(&limiter, "example.com", delay),
+                acquire_domain(&limiter, "example.com", delay)
+            );
+            assert_eq!(first, ());
+            assert_eq!(second, ());
+        });
+        assert!(start.elapsed() >= delay);
+    }
+
+    #[test]
+    fn retry_after_blocks_only_its_domain() {
+        let limiter = local_limiter();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            note_429(&limiter, "example.com", Some(Duration::from_secs(60))).await;
+            let domains = limiter.lock().await;
+            let state = domains.get("example.com").unwrap();
+            assert!(state.gate() > Instant::now());
+            assert!(domains.get("other.example").is_none());
+        });
     }
 }
