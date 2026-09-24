@@ -1042,6 +1042,8 @@ fn extract_table_element(table: scraper::ElementRef, is_wikipedia: bool) -> Tabl
         headers.push(format!("column{}", headers.len() + 1));
     }
 
+    headers = uniquify_headers(headers);
+
     let num_rows = rows.len();
 
     TableExtractionResult {
@@ -1051,6 +1053,28 @@ fn extract_table_element(table: scraper::ElementRef, is_wikipedia: bool) -> Tabl
         num_rows,
         error: None,
     }
+}
+
+fn uniquify_headers(headers: Vec<String>) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut used = HashSet::new();
+    let mut unique_headers = Vec::with_capacity(headers.len());
+    for header in headers {
+        if used.insert(header.clone()) {
+            unique_headers.push(header);
+            continue;
+        }
+
+        for suffix in 1.. {
+            let candidate = format!("{}_{}", header, suffix);
+            if used.insert(candidate.clone()) {
+                unique_headers.push(candidate);
+                break;
+            }
+        }
+    }
+    unique_headers
 }
 
 /// Normalize cell text: trim whitespace, collapse multiple spaces/newlines
@@ -1521,6 +1545,23 @@ fn test_extract_table_basic() {
     assert_eq!(result.num_rows, 2);
     assert_eq!(result.rows[0], vec!["Item 1", "100"]);
     assert_eq!(result.rows[1], vec!["Item 2", "200"]);
+}
+
+#[test]
+fn test_extract_table_duplicate_headers_are_unique() {
+    let html = r#"
+    <table id="gdp">
+        <tr><th>Country</th><th>Estimate</th><th>Year</th><th>Estimate</th></tr>
+        <tr><td>A</td><td>1</td><td>2020</td><td>2</td></tr>
+    </table>
+    "#;
+
+    let result = extract_table(html, "table#gdp", false, 0);
+
+    assert_eq!(
+        result.headers,
+        vec!["Country", "Estimate", "Year", "Estimate_1"]
+    );
 }
 
 #[test]

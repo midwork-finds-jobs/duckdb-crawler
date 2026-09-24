@@ -47,3 +47,22 @@ WHERE Building IS NOT NULL;
 ----
 true
 
+# Repeated source headers must bind to distinct SQL columns.
+statement ok
+SELECT *
+FROM read_html(
+  'https://simple.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)_per_capita',
+  'table.wikitable',
+  1
+)
+LIMIT 1;
+
+query I
+SELECT count(column_name) = count(DISTINCT column_name)
+FROM (DESCRIBE SELECT * FROM read_html(
+  'https://simple.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal)_per_capita',
+  'table.wikitable',
+  1
+));
+----
+true

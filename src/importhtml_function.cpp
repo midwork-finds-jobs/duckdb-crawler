@@ -6,8 +6,10 @@
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 #include "duckdb.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include <set>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -39,6 +41,29 @@ struct ReadHtmlBindData : public TableFunctionData {
     idx_t num_rows = 0;
     string error;
 };
+
+static string MakeUniqueColumnName(const string &header, idx_t fallback_idx, unordered_set<string> &used_names) {
+    string base_name = header;
+    StringUtil::Trim(base_name);
+    if (base_name.empty()) {
+        base_name = "column" + std::to_string(fallback_idx);
+    }
+    for (auto &c : base_name) {
+        if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
+            c = '_';
+        }
+    }
+
+    if (used_names.insert(StringUtil::Lower(base_name)).second) {
+        return base_name;
+    }
+    for (idx_t suffix = 1;; suffix++) {
+        string candidate = base_name + "_" + std::to_string(suffix);
+        if (used_names.insert(StringUtil::Lower(candidate)).second) {
+            return candidate;
+        }
+    }
+}
 
 //===--------------------------------------------------------------------===//
 // Global State
@@ -517,19 +542,11 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
     // Infer column types based on data
     InferColumnTypes(*bind_data);
 
-    // Define columns based on extracted headers and inferred types
+    // Define columns based on extracted headers and inferred types.
+    // Deduplicate after sanitization because DuckDB column names are case-insensitive.
+    unordered_set<string> used_names;
     for (idx_t i = 0; i < bind_data->headers.size(); i++) {
-        // Sanitize header name for SQL compatibility
-        string col_name = bind_data->headers[i];
-        if (col_name.empty()) {
-            col_name = "column" + std::to_string(names.size() + 1);
-        }
-        // Replace spaces and special chars with underscores
-        for (auto &c : col_name) {
-            if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
-                c = '_';
-            }
-        }
+        string col_name = MakeUniqueColumnName(bind_data->headers[i], names.size() + 1, used_names);
         names.emplace_back(col_name);
 
         // Use inferred type
