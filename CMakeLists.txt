@@ -115,6 +115,9 @@ if(ENABLE_RUST_PARSER)
                 ${RUST_PARSER_DIR}/src/lib.rs
                 ${RUST_PARSER_DIR}/src/ffi.rs
                 ${RUST_PARSER_DIR}/src/extractors.rs
+                ${RUST_PARSER_DIR}/src/sitemap.rs
+                ${RUST_PARSER_DIR}/src/robots.rs
+                ${RUST_PARSER_DIR}/src/hydration.rs
         )
 
         # Create imported library target

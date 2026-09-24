@@ -3,6 +3,7 @@
 
 #include "importhtml_function.hpp"
 #include "crawler_compat.hpp"
+#include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 #include "duckdb.hpp"
@@ -494,6 +495,10 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
         bind_data->table_index = static_cast<size_t>(idx - 1);  // Convert to 0-based
     }
 
+    // SET crawler_timeout_ms (ms); read_html fetches during bind, so bind is execute.
+    // Named timeout := N stays seconds and overrides it.
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
+
     // Named parameters
     for (auto &kv : input.named_parameters) {
         if (kv.first == "user_agent") {
@@ -501,6 +506,9 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
         }
+    }
+    if (bind_data->timeout_ms < 1) {
+        bind_data->timeout_ms = 1;
     }
 
     // Fetch and extract table during bind to determine schema

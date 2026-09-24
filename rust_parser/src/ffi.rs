@@ -4,7 +4,24 @@ use crate::extractors::{extract_all, ExtractionRequest};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
+
+fn tokio_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("crawler-tokio")
+            .build()
+            .expect("failed to create crawler tokio runtime")
+    })
+}
+
+fn duration_from_timeout_ms(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms.max(1))
+}
 
 // Global interrupt flag for graceful shutdown
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -717,6 +734,39 @@ async fn fetch_and_extract(
     extraction: &Option<ExtractionRequest>,
     rate_limiter: &DomainRateLimiter,
     delay_ms: u64,
+    timeout: Duration,
+) -> CrawlResult {
+    let start = std::time::Instant::now();
+    let url_for_timeout = url.clone();
+    match tokio::time::timeout(
+        timeout,
+        fetch_and_extract_inner(client, url, extraction, rate_limiter, delay_ms),
+    )
+    .await
+    {
+        Ok(mut result) => {
+            result.response_time_ms = start.elapsed().as_millis() as u64;
+            result
+        }
+        Err(_) => CrawlResult {
+            url: url_for_timeout.clone(),
+            final_url: url_for_timeout,
+            status: 0,
+            content_type: String::new(),
+            body: String::new(),
+            error: Some(format!("timeout after {}ms", timeout.as_millis())),
+            extracted: None,
+            response_time_ms: start.elapsed().as_millis() as u64,
+        },
+    }
+}
+
+async fn fetch_and_extract_inner(
+    client: &reqwest::Client,
+    url: String,
+    extraction: &Option<ExtractionRequest>,
+    rate_limiter: &DomainRateLimiter,
+    delay_ms: u64,
 ) -> CrawlResult {
     let start = std::time::Instant::now();
 
@@ -838,10 +888,32 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         }
     };
 
+    match run_batch_crawl(request) {
+        Ok(response) => match serde_json::to_string(&response) {
+            Ok(json) => ExtractionResultFFI {
+                json_ptr: string_to_ptr(json),
+                error_ptr: ptr::null_mut(),
+            },
+            Err(e) => ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+            },
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(e),
+        },
+    }
+}
+
+fn run_batch_crawl(request: BatchCrawlRequest) -> Result<BatchCrawlResponse, String> {
+    let timeout = duration_from_timeout_ms(request.timeout_ms);
+
     // Build HTTP client with optional proxy
     let mut client_builder = reqwest::Client::builder()
         .user_agent(&request.user_agent)
-        .timeout(Duration::from_millis(request.timeout_ms));
+        .connect_timeout(timeout)
+        .timeout(timeout);
 
     // Configure proxy if provided
     if let Some(ref proxy_url) = request.http_proxy {
@@ -868,28 +940,11 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         client_builder = client_builder.default_headers(header_map);
     }
 
-    let client = match client_builder.build() {
-        Ok(c) => c,
-        Err(e) => {
-            return ExtractionResultFFI {
-                json_ptr: ptr::null_mut(),
-                error_ptr: string_to_ptr(format!("Client build error: {}", e)),
-            };
-        }
-    };
+    let client = client_builder
+        .build()
+        .map_err(|e| format!("Client build error: {}", e))?;
 
-    // Run async crawl
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(r) => r,
-        Err(e) => {
-            return ExtractionResultFFI {
-                json_ptr: ptr::null_mut(),
-                error_ptr: string_to_ptr(format!("Tokio runtime error: {}", e)),
-            };
-        }
-    };
-
-    let results = runtime.block_on(async {
+    let results = tokio_runtime().block_on(async {
         use futures::stream::{self, StreamExt};
 
         let concurrency = request.concurrency.max(1).min(32);
@@ -899,39 +954,52 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         let user_agent = request.user_agent.clone();
         let rate_limiter: DomainRateLimiter = Arc::new(Mutex::new(HashMap::new()));
 
+        // The robots.txt pre-check and the fetch share one budget: crawl() sends
+        // one URL per call, and SET crawler_timeout_ms must bound the whole call.
+        let batch_started = std::time::Instant::now();
+
         // Filter URLs by robots.txt if enabled
         let urls: Vec<String> = if respect_robots {
             let robots_cache = crate::robots::RobotsCache::new();
             let config = ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(10)))
+                .timeout_global(Some(timeout))
                 .build();
             let blocking_agent = ureq::Agent::new_with_config(config);
-
-            request.urls
+            request
+                .urls
                 .into_iter()
                 .filter(|url| {
-                    let check = robots_cache.check_blocking(&blocking_agent, url, &user_agent);
-                    check.allowed
+                    if batch_started.elapsed() >= timeout {
+                        return false;
+                    }
+                    robots_cache
+                        .check_blocking(&blocking_agent, url, &user_agent)
+                        .allowed
                 })
                 .collect()
         } else {
             request.urls
         };
 
-        // Process URLs with interrupt checking
+        let fetch_timeout = timeout
+            .saturating_sub(batch_started.elapsed())
+            .max(Duration::from_millis(1));
+
         let mut results = Vec::new();
         let mut url_stream = stream::iter(urls)
             .map(|url| {
                 let client = client.clone();
                 let extraction = extraction.clone();
                 let rate_limiter = rate_limiter.clone();
-                async move { fetch_and_extract(&client, url, &extraction, &rate_limiter, delay_ms).await }
+                async move {
+                    fetch_and_extract(&client, url, &extraction, &rate_limiter, delay_ms, fetch_timeout)
+                        .await
+                }
             })
             .buffer_unordered(concurrency);
 
         while let Some(result) = url_stream.next().await {
             results.push(result);
-            // Check for interrupt after each result
             if INTERRUPTED.load(Ordering::SeqCst) {
                 break;
             }
@@ -939,18 +1007,7 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         results
     });
 
-    let response = BatchCrawlResponse { results };
-
-    match serde_json::to_string(&response) {
-        Ok(json) => ExtractionResultFFI {
-            json_ptr: string_to_ptr(json),
-            error_ptr: ptr::null_mut(),
-        },
-        Err(e) => ExtractionResultFFI {
-            json_ptr: ptr::null_mut(),
-            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
-        },
-    }
+    Ok(BatchCrawlResponse { results })
 }
 
 // ============================================================================
@@ -961,7 +1018,7 @@ pub unsafe extern "C" fn crawl_batch_ffi(
 #[derive(Debug, serde::Deserialize)]
 struct SitemapRequest {
     url: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     recursive: bool,
     #[serde(default = "default_max_depth")]
     max_depth: usize,
@@ -971,10 +1028,6 @@ struct SitemapRequest {
     timeout_ms: u64,
     #[serde(default)]
     discover_from_robots: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn default_max_depth() -> usize {
@@ -1016,16 +1069,41 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
         }
     };
 
-    let timeout_secs = (request.timeout_ms / 1000).max(1);
+    let timeout = duration_from_timeout_ms(request.timeout_ms);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::Builder::new()
+        .name("sitemap-fetch".into())
+        .spawn(move || {
+            let _ = tx.send(fetch_sitemap_request(request));
+        });
 
+    let combined = match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => crate::sitemap::SitemapResult {
+            urls: vec![],
+            sitemaps: vec![],
+            errors: vec![format!("timeout after {}ms", timeout.as_millis())],
+        },
+    };
+    drop(handle);
+
+    match serde_json::to_string(&combined) {
+        Ok(json) => string_to_ptr(json),
+        Err(e) => {
+            string_to_ptr(format!("{{\"urls\":[],\"sitemaps\":[],\"errors\":[\"Serialization error: {}\"]}}", e))
+        }
+    }
+}
+
+fn fetch_sitemap_request(request: SitemapRequest) -> crate::sitemap::SitemapResult {
+    let timeout = duration_from_timeout_ms(request.timeout_ms);
     let mut sitemap_urls = vec![request.url.clone()];
 
-    // If discover_from_robots, first check robots.txt for sitemap URLs
     if request.discover_from_robots {
         let robots_cache = crate::robots::RobotsCache::new();
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(timeout_secs)))
+                .timeout_global(Some(timeout))
                 .user_agent(&request.user_agent)
                 .build(),
         );
@@ -1042,11 +1120,17 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
         errors: vec![],
     };
 
+    let deadline = std::time::Instant::now() + timeout;
     for sitemap_url in sitemap_urls {
+        if std::time::Instant::now() >= deadline {
+            combined.errors.push("timeout".to_string());
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         let result = crate::sitemap::fetch_sitemap_blocking(
             &sitemap_url,
             &request.user_agent,
-            timeout_secs,
+            remaining,
             request.recursive,
             request.max_depth,
         );
@@ -1054,13 +1138,7 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
         combined.sitemaps.extend(result.sitemaps);
         combined.errors.extend(result.errors);
     }
-
-    match serde_json::to_string(&combined) {
-        Ok(json) => string_to_ptr(json),
-        Err(e) => {
-            string_to_ptr(format!("{{\"urls\":[],\"sitemaps\":[],\"errors\":[\"Serialization error: {}\"]}}", e))
-        }
-    }
+    combined
 }
 
 /// Free a string allocated by Rust
@@ -1145,12 +1223,12 @@ unsafe fn check_robots_ffi_inner(request_json: *const c_char) -> ExtractionResul
         }
     };
 
-    let timeout_secs = (request.timeout_ms / 1000).max(1);
+    let timeout = duration_from_timeout_ms(request.timeout_ms);
 
     // Build ureq agent
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(timeout_secs)))
+            .timeout_global(Some(timeout))
             .user_agent(&request.user_agent)
             .build(),
     );
@@ -1199,5 +1277,106 @@ pub unsafe extern "C" fn extract_hydration_ffi(
             json_ptr: ptr::null_mut(),
             error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
         },
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn hang_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+        port
+    }
+
+    fn batch_request(url: String, timeout_ms: u64) -> BatchCrawlRequest {
+        BatchCrawlRequest {
+            urls: vec![url],
+            extraction: None,
+            user_agent: "timeout-test".to_string(),
+            timeout_ms,
+            concurrency: 1,
+            delay_ms: 0,
+            respect_robots: false,
+            http_proxy: None,
+            http_proxy_username: None,
+            http_proxy_password: None,
+            extra_headers: None,
+        }
+    }
+
+    #[test]
+    fn crawl_timeout_returns_within_budget() {
+        let url = format!("http://127.0.0.1:{}/delay", hang_port());
+        let start = Instant::now();
+        let response = run_batch_crawl(batch_request(url, 2000)).expect("batch crawl");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "crawl hang took {:?}, expected ~2s timeout",
+            elapsed
+        );
+        assert_eq!(response.results.len(), 1);
+        let err = response.results[0].error.as_deref().unwrap_or("");
+        assert!(
+            err.to_lowercase().contains("timeout") || response.results[0].status == 0,
+            "expected timeout error, got status={} error={}",
+            response.results[0].status,
+            err
+        );
+    }
+
+    #[test]
+    fn robots_check_and_fetch_share_one_budget() {
+        let url = format!("http://127.0.0.1:{}/page", hang_port());
+        let mut request = batch_request(url, 2000);
+        request.respect_robots = true;
+        let start = Instant::now();
+        let response = run_batch_crawl(request).expect("batch crawl");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(3500),
+            "robots + fetch took {:?}, expected one ~2s budget",
+            elapsed
+        );
+        assert!(response.results.iter().all(|r| r.status == 0));
+    }
+
+    #[test]
+    fn sitemap_ffi_timeout_returns_within_budget() {
+        let url = format!("http://127.0.0.1:{}/sitemap.xml", hang_port());
+        let request = SitemapRequest {
+            url,
+            recursive: false,
+            max_depth: 5,
+            user_agent: "timeout-test".to_string(),
+            timeout_ms: 2000,
+            discover_from_robots: false,
+        };
+        let start = Instant::now();
+        let result = fetch_sitemap_request(request);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "sitemap hang took {:?}, expected ~2s timeout",
+            elapsed
+        );
+        assert!(result.urls.is_empty());
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("timeout") || e.contains("Failed to fetch")),
+            "errors: {:?}",
+            result.errors
+        );
     }
 }

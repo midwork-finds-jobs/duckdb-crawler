@@ -429,6 +429,7 @@ struct CrawlBindData : public TableFunctionData {
     string state_table;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;  // named timeout := N (seconds) overrides SET crawler_timeout_ms
     int batch_size = 10;  // URLs per Rust batch
     int concurrency = 4;  // Concurrent requests in Rust
     int delay_ms = 0;     // Min delay between requests to same domain
@@ -618,9 +619,7 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
     if (context.TryGetCurrentSetting("crawler_default_delay", setting_value)) {
         bind_data->delay_ms = static_cast<int>(setting_value.GetValue<double>() * 1000);
     }
-    if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
-        bind_data->timeout_ms = static_cast<int>(setting_value.GetValue<int64_t>());
-    }
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
     if (context.TryGetCurrentSetting("crawler_respect_robots", setting_value)) {
         bind_data->respect_robots = setting_value.GetValue<bool>();
     }
@@ -651,6 +650,7 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "workers") {
             bind_data->concurrency = kv.second.GetValue<int>();
         } else if (kv.first == "batch_size") {
@@ -939,10 +939,16 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
             std::map<string, string> extra_headers = bind_data.extra_headers;
             ApplyHttpSecrets(client, url_to_fetch, http_proxy, http_proxy_username, http_proxy_password, extra_headers);
 
+            // Re-read SET crawler_timeout_ms at execute: a SET after bind (or a
+            // prepared statement) must still bound the fetch.
+            int timeout_ms = bind_data.timeout_explicit ? bind_data.timeout_ms : GetCrawlerTimeoutMs(client);
+            if (timeout_ms < 1) {
+                timeout_ms = 1;
+            }
             string request_json = BuildBatchCrawlRequest(
                 {url_to_fetch},
                 bind_data.user_agent,
-                bind_data.timeout_ms,
+                timeout_ms,
                 1,  // Single URL, single concurrency
                 bind_data.delay_ms,
                 bind_data.respect_robots,

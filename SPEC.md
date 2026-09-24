@@ -303,7 +303,7 @@ crawl(
 ```sql
 sitemap(
     url,                       -- Sitemap URL or site root
-    recursive = true,          -- Follow sitemap index
+    recursive = false,         -- Follow sitemap index (bounded by crawler_timeout_ms)
     filter_pattern = '%',      -- SQL LIKE filter on URLs
 )
 ```

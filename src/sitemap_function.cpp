@@ -4,6 +4,7 @@
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "crawler_compat.hpp"
+#include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 
@@ -17,11 +18,12 @@ using namespace duckdb_yyjson;
 
 struct SitemapBindData : public TableFunctionData {
     string url;
-    bool recursive = true;
+    bool recursive = false;
     int max_depth = 5;
     bool discover_from_robots = false;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;
     string filter_pattern;
 };
 
@@ -49,7 +51,7 @@ struct SitemapGlobalState : public GlobalTableFunctionState {
 // Helper: Build request JSON
 //===--------------------------------------------------------------------===//
 
-static string BuildSitemapRequest(const SitemapBindData &bind_data) {
+static string BuildSitemapRequest(const SitemapBindData &bind_data, int timeout_ms) {
     yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
     if (!doc) return "{}";
 
@@ -61,7 +63,7 @@ static string BuildSitemapRequest(const SitemapBindData &bind_data) {
     yyjson_mut_obj_add_uint(doc, root, "max_depth", bind_data.max_depth);
     yyjson_mut_obj_add_bool(doc, root, "discover_from_robots", bind_data.discover_from_robots);
     yyjson_mut_obj_add_strcpy(doc, root, "user_agent", bind_data.user_agent.c_str());
-    yyjson_mut_obj_add_uint(doc, root, "timeout_ms", bind_data.timeout_ms);
+    yyjson_mut_obj_add_uint(doc, root, "timeout_ms", timeout_ms);
 
     size_t len = 0;
     char *json_str = yyjson_mut_write(doc, 0, &len);
@@ -149,6 +151,8 @@ static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
         throw BinderException("sitemap() requires a URL argument");
     }
 
+    bind_data->timeout_ms = GetCrawlerTimeoutMs(context);
+
     // Named parameters
     for (auto &kv : input.named_parameters) {
         if (kv.first == "recursive") {
@@ -161,6 +165,7 @@ static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "filter") {
             bind_data->filter_pattern = StringValue::Get(kv.second);
         }
@@ -201,7 +206,12 @@ static void SitemapFunction(ClientContext &context, TableFunctionInput &data, Da
 
     // Fetch sitemap on first call
     if (!state.fetched) {
-        string request_json = BuildSitemapRequest(bind_data);
+        // Re-read SET crawler_timeout_ms at execute; named timeout := wins.
+        int timeout_ms = bind_data.timeout_explicit ? bind_data.timeout_ms : GetCrawlerTimeoutMs(context);
+        if (timeout_ms < 1) {
+            timeout_ms = 1;
+        }
+        string request_json = BuildSitemapRequest(bind_data, timeout_ms);
         string response_json = FetchSitemapWithRust(request_json);
         state.entries = ParseSitemapResponse(response_json, bind_data.filter_pattern);
         state.fetched = true;
