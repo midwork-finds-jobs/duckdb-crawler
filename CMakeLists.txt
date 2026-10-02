@@ -113,6 +113,7 @@ if(ENABLE_RUST_PARSER)
             DEPENDS
                 ${RUST_PARSER_DIR}/Cargo.toml
                 ${RUST_PARSER_DIR}/src/lib.rs
+                ${RUST_PARSER_DIR}/src/sitemap.rs
                 ${RUST_PARSER_DIR}/src/ffi.rs
                 ${RUST_PARSER_DIR}/src/extractors.rs
         )

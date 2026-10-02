@@ -4,7 +4,7 @@ use crate::extractors::{extract_all, ExtractionRequest};
 use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Global interrupt flag for graceful shutdown
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -689,7 +689,12 @@ fn extract_domain(url: &str) -> String {
 }
 
 /// Per-domain rate limiter
-type DomainRateLimiter = Arc<Mutex<HashMap<String, std::time::Instant>>>;
+type DomainRateLimiter = Arc<Mutex<HashMap<String, (Instant, u32)>>>;
+
+fn global_rate_limiter() -> DomainRateLimiter {
+    static LIMITER: std::sync::OnceLock<DomainRateLimiter> = std::sync::OnceLock::new();
+    LIMITER.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
+}
 
 /// Single crawl result
 #[derive(Debug, serde::Serialize)]
@@ -717,38 +722,40 @@ async fn fetch_and_extract(
     extraction: &Option<ExtractionRequest>,
     rate_limiter: &DomainRateLimiter,
     delay_ms: u64,
+    deadline: tokio::time::Instant,
+) -> CrawlResult {
+    let start = Instant::now();
+    let fetch = fetch_and_extract_inner(client, url.clone(), extraction, rate_limiter, delay_ms);
+    match tokio::time::timeout_at(deadline, fetch).await {
+        Ok(result) => result,
+        Err(_) => CrawlResult {
+            url: url.clone(), final_url: url, status: 0,
+            content_type: String::new(), body: String::new(),
+            error: Some("crawl timeout".to_string()), extracted: None,
+            response_time_ms: start.elapsed().as_millis() as u64,
+        },
+    }
+}
+
+async fn fetch_and_extract_inner(
+    client: &reqwest::Client,
+    url: String,
+    extraction: &Option<ExtractionRequest>,
+    rate_limiter: &DomainRateLimiter,
+    delay_ms: u64,
 ) -> CrawlResult {
     let start = std::time::Instant::now();
 
-    // Apply per-domain rate limiting
-    if delay_ms > 0 {
-        let domain = extract_domain(&url);
-        let delay = Duration::from_millis(delay_ms);
-
-        let wait_time = {
-            let limiter = rate_limiter.lock().await;
-            if let Some(last_access) = limiter.get(&domain) {
-                let elapsed = last_access.elapsed();
-                if elapsed < delay {
-                    Some(delay - elapsed)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(wait) = wait_time {
-            tokio::time::sleep(wait).await;
-        }
-
-        // Update last access time
-        {
-            let mut limiter = rate_limiter.lock().await;
-            limiter.insert(domain, std::time::Instant::now());
-        }
-    }
+    let domain = extract_domain(&url);
+    let wait = {
+        let mut limiter = rate_limiter.lock().await;
+        let now = Instant::now();
+        let state = limiter.entry(domain.clone()).or_insert((now, 0));
+        let ready = state.0.max(now);
+        state.0 = ready + Duration::from_millis(delay_ms);
+        ready.saturating_duration_since(now)
+    };
+    tokio::time::sleep(wait).await;
 
     match client.get(&url).send().await {
         Ok(response) => {
@@ -761,6 +768,19 @@ async fn fetch_and_extract(
                 .unwrap_or("")
                 .to_string();
 
+            {
+                let mut limiter = rate_limiter.lock().await;
+                let state = limiter.get_mut(&domain).unwrap();
+                if status == 429 {
+                    state.1 = state.1.saturating_add(1);
+                    let seconds = response.headers().get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<u64>().ok())
+                        .unwrap_or(1u64 << state.1.saturating_sub(1).min(9)).min(600);
+                    state.0 = state.0.max(Instant::now() + Duration::from_secs(seconds));
+                } else if (200..400).contains(&status) {
+                    state.1 = 0;
+                }
+            }
             match response.text().await {
                 Ok(body) => {
                     let extracted = if let Some(req) = extraction {
@@ -838,10 +858,12 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         }
     };
 
+    let timeout = Duration::from_millis(request.timeout_ms.max(1));
+    let deadline = Instant::now() + timeout;
     // Build HTTP client with optional proxy
     let mut client_builder = reqwest::Client::builder()
         .user_agent(&request.user_agent)
-        .timeout(Duration::from_millis(request.timeout_ms));
+        .timeout(timeout);
 
     // Configure proxy if provided
     if let Some(ref proxy_url) = request.http_proxy {
@@ -897,19 +919,19 @@ pub unsafe extern "C" fn crawl_batch_ffi(
         let delay_ms = request.delay_ms;
         let respect_robots = request.respect_robots;
         let user_agent = request.user_agent.clone();
-        let rate_limiter: DomainRateLimiter = Arc::new(Mutex::new(HashMap::new()));
+        let rate_limiter = global_rate_limiter();
 
         // Filter URLs by robots.txt if enabled
         let urls: Vec<String> = if respect_robots {
             let robots_cache = crate::robots::RobotsCache::new();
-            let config = ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(10)))
-                .build();
-            let blocking_agent = ureq::Agent::new_with_config(config);
 
             request.urls
                 .into_iter()
                 .filter(|url| {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() { return false; }
+                    let blocking_agent = ureq::Agent::new_with_config(
+                        ureq::Agent::config_builder().timeout_global(Some(remaining)).build());
                     let check = robots_cache.check_blocking(&blocking_agent, url, &user_agent);
                     check.allowed
                 })
@@ -918,6 +940,7 @@ pub unsafe extern "C" fn crawl_batch_ffi(
             request.urls
         };
 
+        let fetch_deadline = tokio::time::Instant::from_std(deadline);
         // Process URLs with interrupt checking
         let mut results = Vec::new();
         let mut url_stream = stream::iter(urls)
@@ -925,7 +948,7 @@ pub unsafe extern "C" fn crawl_batch_ffi(
                 let client = client.clone();
                 let extraction = extraction.clone();
                 let rate_limiter = rate_limiter.clone();
-                async move { fetch_and_extract(&client, url, &extraction, &rate_limiter, delay_ms).await }
+                async move { fetch_and_extract(&client, url, &extraction, &rate_limiter, delay_ms, fetch_deadline).await }
             })
             .buffer_unordered(concurrency);
 
@@ -1016,7 +1039,8 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
         }
     };
 
-    let timeout_secs = (request.timeout_ms / 1000).max(1);
+    let timeout = Duration::from_millis(request.timeout_ms.max(1));
+    let deadline = Instant::now() + timeout;
 
     let mut sitemap_urls = vec![request.url.clone()];
 
@@ -1025,7 +1049,7 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
         let robots_cache = crate::robots::RobotsCache::new();
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
-                .timeout_global(Some(Duration::from_secs(timeout_secs)))
+                .timeout_global(Some(timeout))
                 .user_agent(&request.user_agent)
                 .build(),
         );
@@ -1043,10 +1067,14 @@ unsafe fn fetch_sitemap_simple_inner(request_json: *const c_char) -> *mut c_char
     };
 
     for sitemap_url in sitemap_urls {
+        if Instant::now() >= deadline {
+            combined.errors.push("sitemap timeout".to_string());
+            break;
+        }
         let result = crate::sitemap::fetch_sitemap_blocking(
             &sitemap_url,
             &request.user_agent,
-            timeout_secs,
+            deadline,
             request.recursive,
             request.max_depth,
         );
@@ -1199,5 +1227,90 @@ pub unsafe extern "C" fn extract_hydration_ffi(
             json_ptr: ptr::null_mut(),
             error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
         },
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    #[test]
+    fn deadlines_cover_http_delay_backoff_and_sitemap_children() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        let root = base.clone();
+        let server = std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                if let Ok((mut socket, _)) = listener.accept() {
+                    let root = root.clone();
+                    std::thread::spawn(move || {
+                        socket.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                        let mut request = Vec::new();
+                        let mut buf = [0; 2048];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            let n = socket.read(&mut buf).unwrap_or(0);
+                            if n == 0 { return; }
+                            request.extend_from_slice(&buf[..n]);
+                        }
+                        let request = String::from_utf8_lossy(&request);
+                        let path = request.split_whitespace().nth(1).unwrap_or("");
+                        if path.contains("slow") || path == "/robots.txt" {
+                            std::thread::sleep(Duration::from_millis(500));
+                        }
+                        let body = if path == "/index.xml" {
+                            format!("<sitemapindex><sitemap><loc>{root}/slow.xml</loc></sitemap><sitemap><loc>{root}/slow2.xml</loc></sitemap></sitemapindex>")
+                        } else { "<urlset><url><loc>https://example.com/page</loc></url></urlset>".into() };
+                        let status = if path == "/rate" { "429 Too Many Requests\r\nRetry-After: 5" } else { "200 OK" };
+                        let _ = write!(socket, "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    });
+                } else { std::thread::sleep(Duration::from_millis(1)); }
+            }
+        });
+        let crawl = |path: &str, delay: u64, robots: bool| {
+            let request = CString::new(serde_json::json!({
+                "urls": [format!("{base}/{path}")], "timeout_ms": 100,
+                "delay_ms": delay, "respect_robots": robots
+            }).to_string()).unwrap();
+            let start = Instant::now();
+            let response = unsafe { crawl_batch_ffi(request.as_ptr()) };
+            assert!(start.elapsed() < Duration::from_millis(400));
+            assert!(response.error_ptr.is_null());
+            let value: serde_json::Value = unsafe {
+                serde_json::from_str(CStr::from_ptr(response.json_ptr).to_str().unwrap()).unwrap()
+            };
+            unsafe { free_extraction_result(response); }
+            value
+        };
+        for (first, delay) in [("page", 1000), ("rate", 0)] {
+            global_rate_limiter().blocking_lock().clear();
+            let response = crawl(first, delay, false);
+            assert_eq!(response["results"][0]["status"], if first == "rate" { 429 } else { 200 }, "{response}");
+            let response = crawl("page", delay, false);
+            assert_eq!(response["results"][0]["error"], "crawl timeout");
+        }
+        global_rate_limiter().blocking_lock().clear();
+        assert_eq!(crawl("slow", 0, false)["results"][0]["status"], 0);
+        let robots = crawl("slow", 0, true);
+        assert!(robots["results"].as_array().unwrap().iter().all(|r| r["status"] == 0));
+        for path in ["slow.xml", "index.xml"] {
+            let request = CString::new(serde_json::json!({
+                "url": format!("{base}/{path}"), "timeout_ms": 100
+            }).to_string()).unwrap();
+            let start = Instant::now();
+            let ptr = unsafe { fetch_sitemap_simple(request.as_ptr()) };
+            assert!(start.elapsed() < Duration::from_millis(180));
+            let response: serde_json::Value = unsafe {
+                serde_json::from_str(CStr::from_ptr(ptr).to_str().unwrap()).unwrap()
+            };
+            unsafe { free_rust_string(ptr); }
+            assert!(response["urls"].as_array().unwrap().is_empty());
+            assert!(!response["errors"].as_array().unwrap().is_empty());
+        }
+        stopped.store(true, Ordering::SeqCst);
+        server.join().unwrap();
     }
 }

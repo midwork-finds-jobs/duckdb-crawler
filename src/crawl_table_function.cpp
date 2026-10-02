@@ -429,6 +429,7 @@ struct CrawlBindData : public TableFunctionData {
     string state_table;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
+    bool timeout_explicit = false;
     int batch_size = 10;  // URLs per Rust batch
     int concurrency = 4;  // Concurrent requests in Rust
     int delay_ms = 0;     // Min delay between requests to same domain
@@ -651,6 +652,7 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
             bind_data->user_agent = StringValue::Get(kv.second);
         } else if (kv.first == "timeout") {
             bind_data->timeout_ms = kv.second.GetValue<int>() * 1000;
+            bind_data->timeout_explicit = true;
         } else if (kv.first == "workers") {
             bind_data->concurrency = kv.second.GetValue<int>();
         } else if (kv.first == "batch_size") {
@@ -939,10 +941,15 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
             std::map<string, string> extra_headers = bind_data.extra_headers;
             ApplyHttpSecrets(client, url_to_fetch, http_proxy, http_proxy_username, http_proxy_password, extra_headers);
 
+            int timeout_ms = bind_data.timeout_ms;
+            Value timeout_setting;
+            if (!bind_data.timeout_explicit && client.TryGetCurrentSetting("crawler_timeout_ms", timeout_setting)) {
+                timeout_ms = timeout_setting.GetValue<int>();
+            }
             string request_json = BuildBatchCrawlRequest(
                 {url_to_fetch},
                 bind_data.user_agent,
-                bind_data.timeout_ms,
+                MaxValue(1, timeout_ms),
                 1,  // Single URL, single concurrency
                 bind_data.delay_ms,
                 bind_data.respect_robots,

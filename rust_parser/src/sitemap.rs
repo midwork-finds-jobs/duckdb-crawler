@@ -2,6 +2,7 @@
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use std::time::Instant;
 
 /// Single sitemap entry
 #[derive(Debug, Clone, serde::Serialize)]
@@ -132,18 +133,17 @@ pub fn parse_sitemap(xml: &str) -> SitemapResult {
 pub fn fetch_sitemap_blocking(
     url: &str,
     user_agent: &str,
-    timeout_secs: u64,
+    deadline: Instant,
     recursive: bool,
     max_depth: usize,
 ) -> SitemapResult {
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .timeout_global(Some(std::time::Duration::from_secs(timeout_secs)))
             .user_agent(user_agent)
             .build(),
     );
 
-    fetch_sitemap_internal_ureq(&agent, url, recursive, max_depth, 0)
+    fetch_sitemap_internal_ureq(&agent, url, recursive, max_depth, 0, deadline)
 }
 
 fn fetch_sitemap_internal_ureq(
@@ -152,6 +152,7 @@ fn fetch_sitemap_internal_ureq(
     recursive: bool,
     max_depth: usize,
     current_depth: usize,
+    deadline: Instant,
 ) -> SitemapResult {
     let mut result = SitemapResult {
         urls: vec![],
@@ -159,12 +160,17 @@ fn fetch_sitemap_internal_ureq(
         errors: vec![],
     };
 
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        result.errors.push(format!("sitemap timeout fetching {}", url));
+        return result;
+    }
     if current_depth > max_depth {
         return result;
     }
 
     // Fetch the sitemap
-    let xml = match agent.get(url).call() {
+    let xml = match agent.get(url).config().timeout_global(Some(remaining)).build().call() {
         Ok(resp) => {
             if resp.status().is_success() {
                 match resp.into_body().read_to_string() {
@@ -205,6 +211,7 @@ fn fetch_sitemap_internal_ureq(
                 recursive,
                 max_depth,
                 current_depth + 1,
+                deadline,
             );
             result.urls.extend(child_result.urls);
             result.sitemaps.extend(child_result.sitemaps);
