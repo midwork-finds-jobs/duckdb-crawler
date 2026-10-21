@@ -155,6 +155,9 @@ static unique_ptr<FunctionData> SitemapBind(ClientContext &context, TableFunctio
 
 	// Named parameters
 	for (auto &kv : input.named_parameters) {
+		if (kv.second.IsNull()) {
+			continue;
+		}
 		if (kv.first == "recursive") {
 			bind_data->recursive = kv.second.GetValue<bool>();
 		} else if (kv.first == "max_depth") {
@@ -234,12 +237,12 @@ void RegisterSitemapFunction(ExtensionLoader &loader) {
 	TableFunction sitemap_func("sitemap", {LogicalType::VARCHAR}, SitemapFunction, SitemapBind, SitemapInitGlobal);
 
 	// Named parameters
-	sitemap_func.named_parameters["recursive"] = LogicalType::BOOLEAN;
-	sitemap_func.named_parameters["max_depth"] = LogicalType::INTEGER;
-	sitemap_func.named_parameters["discover"] = LogicalType::BOOLEAN;
-	sitemap_func.named_parameters["user_agent"] = LogicalType::VARCHAR;
-	sitemap_func.named_parameters["timeout"] = LogicalType::INTEGER;
-	sitemap_func.named_parameters["filter"] = LogicalType::VARCHAR;
+	CrawlerAddNamedParameter(sitemap_func, "recursive", LogicalType::BOOLEAN);
+	CrawlerAddNamedParameter(sitemap_func, "max_depth", LogicalType::INTEGER);
+	CrawlerAddNamedParameter(sitemap_func, "discover", LogicalType::BOOLEAN);
+	CrawlerAddNamedParameter(sitemap_func, "user_agent", LogicalType::VARCHAR);
+	CrawlerAddNamedParameter(sitemap_func, "timeout", LogicalType::INTEGER);
+	CrawlerAddNamedParameter(sitemap_func, "filter", LogicalType::VARCHAR);
 
 	loader.RegisterFunction(sitemap_func);
 }

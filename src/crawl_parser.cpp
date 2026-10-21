@@ -264,7 +264,11 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	}
 
 	// Use DuckDB's parser to parse the MERGE INTO statement
+#if CRAWLER_DUCKDB_V2
+	auto parser = Parser::GetBuiltinParser();
+#else
 	Parser parser;
+#endif
 	try {
 		parser.ParseQuery(merge_query);
 	} catch (std::exception &e) {

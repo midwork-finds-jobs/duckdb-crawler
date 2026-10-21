@@ -655,6 +655,9 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
 
 	// Named parameters
 	for (auto &kv : input.named_parameters) {
+		if (kv.second.IsNull()) {
+			continue;
+		}
 		if (kv.first == "state_table") {
 			bind_data->state_table = StringValue::Get(kv.second);
 		} else if (kv.first == "user_agent") {
@@ -997,18 +1000,18 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
 void RegisterCrawlTableFunction(ExtensionLoader &loader) {
 	// Named parameters helper
 	auto add_params = [](TableFunction &func) {
-		func.named_parameters["state_table"] = LogicalType::VARCHAR;
-		func.named_parameters["user_agent"] = LogicalType::VARCHAR;
-		func.named_parameters["timeout"] = LogicalType::INTEGER;
-		func.named_parameters["workers"] = LogicalType::INTEGER;
-		func.named_parameters["batch_size"] = LogicalType::INTEGER;
-		func.named_parameters["delay"] = LogicalType::INTEGER;
-		func.named_parameters["respect_robots"] = LogicalType::BOOLEAN;
-		func.named_parameters["follow"] = LogicalType::VARCHAR;
-		func.named_parameters["max_depth"] = LogicalType::INTEGER;
-		func.named_parameters["cache"] = LogicalType::BOOLEAN;
-		func.named_parameters["cache_ttl"] = LogicalType::INTEGER;
-		func.named_parameters["max_results"] = LogicalType::BIGINT;
+		CrawlerAddNamedParameter(func, "state_table", LogicalType::VARCHAR);
+		CrawlerAddNamedParameter(func, "user_agent", LogicalType::VARCHAR);
+		CrawlerAddNamedParameter(func, "timeout", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "workers", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "batch_size", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "delay", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "respect_robots", LogicalType::BOOLEAN);
+		CrawlerAddNamedParameter(func, "follow", LogicalType::VARCHAR);
+		CrawlerAddNamedParameter(func, "max_depth", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "cache", LogicalType::BOOLEAN);
+		CrawlerAddNamedParameter(func, "cache_ttl", LogicalType::INTEGER);
+		CrawlerAddNamedParameter(func, "max_results", LogicalType::BIGINT);
 	};
 
 	// All overloads are in-out functions: bare calls run as a table-scan
