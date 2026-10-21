@@ -501,6 +501,9 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context, TableFuncti
 
 	// Named parameters
 	for (auto &kv : input.named_parameters) {
+		if (kv.second.IsNull()) {
+			continue;
+		}
 		if (kv.first == "user_agent") {
 			bind_data->user_agent = StringValue::Get(kv.second);
 		} else if (kv.first == "timeout") {
@@ -624,14 +627,14 @@ void RegisterReadHtmlFunction(ExtensionLoader &loader) {
 	                             ReadHtmlBind, ReadHtmlInitGlobal);
 
 	// Named parameters
-	read_html_func.named_parameters["user_agent"] = LogicalType::VARCHAR;
-	read_html_func.named_parameters["timeout"] = LogicalType::INTEGER;
+	CrawlerAddNamedParameter(read_html_func, "user_agent", LogicalType::VARCHAR);
+	CrawlerAddNamedParameter(read_html_func, "timeout", LogicalType::INTEGER);
 
 	// 3-argument version: read_html(url, selector, table_index) - like Google Sheets IMPORTHTML
 	TableFunction read_html_func_idx("read_html", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::INTEGER},
 	                                 ReadHtmlFunction, ReadHtmlBind, ReadHtmlInitGlobal);
-	read_html_func_idx.named_parameters["user_agent"] = LogicalType::VARCHAR;
-	read_html_func_idx.named_parameters["timeout"] = LogicalType::INTEGER;
+	CrawlerAddNamedParameter(read_html_func_idx, "user_agent", LogicalType::VARCHAR);
+	CrawlerAddNamedParameter(read_html_func_idx, "timeout", LogicalType::INTEGER);
 
 	loader.RegisterFunction(read_html_func);
 	loader.RegisterFunction(read_html_func_idx);
