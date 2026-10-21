@@ -1,6 +1,6 @@
 # name: test/sql/page_info.test
 # description: Test page_info(), html.meta, and final_url features
-# group: [crawler]
+# group: [sql]
 
 require crawler
 

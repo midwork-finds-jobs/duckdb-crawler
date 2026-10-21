@@ -157,8 +157,7 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 		}
 
 		// Skip other function names that merely contain "crawl("
-		if (crawl_pos > 0 &&
-		    (lower_result[crawl_pos - 1] == '_' || isalnum(lower_result[crawl_pos - 1]))) {
+		if (crawl_pos > 0 && (lower_result[crawl_pos - 1] == '_' || isalnum(lower_result[crawl_pos - 1]))) {
 			pos = crawl_pos + 1;
 			continue;
 		}
@@ -209,7 +208,8 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 
 // Helper to extract column names from join condition for UPDATE BY NAME exclusion
 static void ExtractJoinColumns(const ParsedExpression *expr, vector<string> &columns) {
-	if (!expr) return;
+	if (!expr)
+		return;
 
 	if (expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
@@ -238,7 +238,7 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	// We handle LIMIT separately as it's our extension
 	int64_t row_limit = 0;
 	size_t limit_pos = lower.rfind(" limit ");
-	string merge_query = trimmed.substr(9);  // Strip "CRAWLING " prefix
+	string merge_query = trimmed.substr(9); // Strip "CRAWLING " prefix
 
 	if (limit_pos != string::npos && limit_pos > lower.find("then")) {
 		// Extract LIMIT value
@@ -276,9 +276,8 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	}
 
 	if (parser.statements[0]->type != StatementType::MERGE_INTO_STATEMENT) {
-		return ParserExtensionParseResult(
-			"CRAWLING MERGE INTO syntax error: expected MERGE INTO statement, got " +
-			StatementTypeToString(parser.statements[0]->type));
+		return ParserExtensionParseResult("CRAWLING MERGE INTO syntax error: expected MERGE INTO statement, got " +
+		                                  StatementTypeToString(parser.statements[0]->type));
 	}
 
 	// Extract the parsed MergeIntoStatement
@@ -414,7 +413,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 
 		// Look up the registered stream_merge_internal function
 		auto catalog_entry = catalog.GetEntry(context, CatalogType::TABLE_FUNCTION_ENTRY, DEFAULT_SCHEMA,
-		                                       "stream_merge_internal", OnEntryNotFound::THROW_EXCEPTION);
+		                                      "stream_merge_internal", OnEntryNotFound::THROW_EXCEPTION);
 		auto &table_function_catalog_entry = catalog_entry->Cast<TableFunctionCatalogEntry>();
 
 		if (table_function_catalog_entry.functions.functions.empty()) {
@@ -440,7 +439,8 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 		// Serialize join_columns to comma-separated string
 		string join_cols_str;
 		for (size_t i = 0; i < merge_data.join_columns.size(); i++) {
-			if (i > 0) join_cols_str += ",";
+			if (i > 0)
+				join_cols_str += ",";
 			join_cols_str += merge_data.join_columns[i];
 		}
 
@@ -450,7 +450,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 
 		// Get first matched action details (simplified - assumes single action per condition)
 		string matched_condition;
-		int32_t matched_action = 0;  // 0 = UPDATE, 1 = DELETE
+		int32_t matched_action = 0; // 0 = UPDATE, 1 = DELETE
 		bool matched_update_by_name = false;
 
 		if (has_matched) {
@@ -482,9 +482,9 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 		// Get WHEN NOT MATCHED BY SOURCE action details
 		bool has_not_matched_by_source = merge_data.actions.count(MergeActionCondition::WHEN_NOT_MATCHED_BY_SOURCE) > 0;
 		string not_matched_by_source_condition;
-		int32_t not_matched_by_source_action = 0;  // 0 = UPDATE, 1 = DELETE
+		int32_t not_matched_by_source_action = 0; // 0 = UPDATE, 1 = DELETE
 		bool not_matched_by_source_update_by_name = false;
-		string not_matched_by_source_set_clauses;  // "col=expr;col=expr" format
+		string not_matched_by_source_set_clauses; // "col=expr;col=expr" format
 
 		if (has_not_matched_by_source) {
 			auto &nmbs_actions = merge_data.actions.at(MergeActionCondition::WHEN_NOT_MATCHED_BY_SOURCE);
@@ -500,7 +500,8 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 					not_matched_by_source_update_by_name = (action.column_order == InsertColumnOrder::INSERT_BY_NAME);
 					// Extract explicit SET clauses
 					for (size_t i = 0; i < action.set_columns.size(); i++) {
-						if (i > 0) not_matched_by_source_set_clauses += ";";
+						if (i > 0)
+							not_matched_by_source_set_clauses += ";";
 						not_matched_by_source_set_clauses += action.set_columns[i] + "=";
 						if (i < action.set_expressions.size()) {
 							not_matched_by_source_set_clauses += action.set_expressions[i]->ToString();

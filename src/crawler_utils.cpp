@@ -20,47 +20,59 @@ namespace duckdb {
 // Error Classification
 //===--------------------------------------------------------------------===//
 
-const char* ErrorTypeToString(CrawlErrorType type) {
+const char *ErrorTypeToString(CrawlErrorType type) {
 	switch (type) {
-		case CrawlErrorType::NONE: return "";
-		case CrawlErrorType::NETWORK_TIMEOUT: return "network_timeout";
-		case CrawlErrorType::NETWORK_DNS_FAILURE: return "network_dns_failure";
-		case CrawlErrorType::NETWORK_CONNECTION_REFUSED: return "network_connection_refused";
-		case CrawlErrorType::NETWORK_SSL_ERROR: return "network_ssl_error";
-		case CrawlErrorType::HTTP_CLIENT_ERROR: return "http_client_error";
-		case CrawlErrorType::HTTP_SERVER_ERROR: return "http_server_error";
-		case CrawlErrorType::HTTP_RATE_LIMITED: return "http_rate_limited";
-		case CrawlErrorType::ROBOTS_DISALLOWED: return "robots_disallowed";
-		case CrawlErrorType::CONTENT_TOO_LARGE: return "content_too_large";
-		case CrawlErrorType::CONTENT_TYPE_REJECTED: return "content_type_rejected";
-		case CrawlErrorType::MAX_RETRIES_EXCEEDED: return "max_retries_exceeded";
-		default: return "unknown";
+	case CrawlErrorType::NONE:
+		return "";
+	case CrawlErrorType::NETWORK_TIMEOUT:
+		return "network_timeout";
+	case CrawlErrorType::NETWORK_DNS_FAILURE:
+		return "network_dns_failure";
+	case CrawlErrorType::NETWORK_CONNECTION_REFUSED:
+		return "network_connection_refused";
+	case CrawlErrorType::NETWORK_SSL_ERROR:
+		return "network_ssl_error";
+	case CrawlErrorType::HTTP_CLIENT_ERROR:
+		return "http_client_error";
+	case CrawlErrorType::HTTP_SERVER_ERROR:
+		return "http_server_error";
+	case CrawlErrorType::HTTP_RATE_LIMITED:
+		return "http_rate_limited";
+	case CrawlErrorType::ROBOTS_DISALLOWED:
+		return "robots_disallowed";
+	case CrawlErrorType::CONTENT_TOO_LARGE:
+		return "content_too_large";
+	case CrawlErrorType::CONTENT_TYPE_REJECTED:
+		return "content_type_rejected";
+	case CrawlErrorType::MAX_RETRIES_EXCEEDED:
+		return "max_retries_exceeded";
+	default:
+		return "unknown";
 	}
 }
 
 CrawlErrorType ClassifyError(int status_code, const std::string &error_msg) {
-	if (status_code == 429) return CrawlErrorType::HTTP_RATE_LIMITED;
-	if (status_code >= 500 && status_code < 600) return CrawlErrorType::HTTP_SERVER_ERROR;
-	if (status_code >= 400 && status_code < 500) return CrawlErrorType::HTTP_CLIENT_ERROR;
+	if (status_code == 429)
+		return CrawlErrorType::HTTP_RATE_LIMITED;
+	if (status_code >= 500 && status_code < 600)
+		return CrawlErrorType::HTTP_SERVER_ERROR;
+	if (status_code >= 400 && status_code < 500)
+		return CrawlErrorType::HTTP_CLIENT_ERROR;
 	if (status_code <= 0) {
 		// Network error - classify from message
-		if (error_msg.find("timeout") != std::string::npos ||
-		    error_msg.find("Timeout") != std::string::npos) {
+		if (error_msg.find("timeout") != std::string::npos || error_msg.find("Timeout") != std::string::npos) {
 			return CrawlErrorType::NETWORK_TIMEOUT;
 		}
-		if (error_msg.find("DNS") != std::string::npos ||
-		    error_msg.find("resolve") != std::string::npos) {
+		if (error_msg.find("DNS") != std::string::npos || error_msg.find("resolve") != std::string::npos) {
 			return CrawlErrorType::NETWORK_DNS_FAILURE;
 		}
-		if (error_msg.find("SSL") != std::string::npos ||
-		    error_msg.find("certificate") != std::string::npos) {
+		if (error_msg.find("SSL") != std::string::npos || error_msg.find("certificate") != std::string::npos) {
 			return CrawlErrorType::NETWORK_SSL_ERROR;
 		}
-		if (error_msg.find("refused") != std::string::npos ||
-		    error_msg.find("connect") != std::string::npos) {
+		if (error_msg.find("refused") != std::string::npos || error_msg.find("connect") != std::string::npos) {
 			return CrawlErrorType::NETWORK_CONNECTION_REFUSED;
 		}
-		return CrawlErrorType::NETWORK_TIMEOUT;  // Default network error
+		return CrawlErrorType::NETWORK_TIMEOUT; // Default network error
 	}
 	return CrawlErrorType::NONE;
 }
@@ -82,7 +94,7 @@ std::string DecompressGzip(const std::string &compressed_data) {
 		return "";
 	}
 
-	zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_data.data()));
+	zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed_data.data()));
 	zs.avail_in = static_cast<uInt>(compressed_data.size());
 
 	std::string decompressed;
@@ -90,7 +102,7 @@ std::string DecompressGzip(const std::string &compressed_data) {
 
 	int ret;
 	do {
-		zs.next_out = reinterpret_cast<Bytef*>(buffer);
+		zs.next_out = reinterpret_cast<Bytef *>(buffer);
 		zs.avail_out = sizeof(buffer);
 
 		ret = inflate(&zs, Z_NO_FLUSH);
@@ -109,8 +121,7 @@ std::string DecompressGzip(const std::string &compressed_data) {
 }
 
 bool IsGzippedData(const std::string &data) {
-	return data.size() >= 2 &&
-	       static_cast<unsigned char>(data[0]) == 0x1f &&
+	return data.size() >= 2 && static_cast<unsigned char>(data[0]) == 0x1f &&
 	       static_cast<unsigned char>(data[1]) == 0x8b;
 }
 
@@ -119,13 +130,15 @@ bool IsGzippedData(const std::string &data) {
 //===--------------------------------------------------------------------===//
 
 int FibonacciBackoffSeconds(int n, int max_seconds) {
-	if (n <= 1) return 3;
+	if (n <= 1)
+		return 3;
 	int a = 3, b = 3;
 	for (int i = 2; i <= n; i++) {
 		int temp = a + b;
 		a = b;
 		b = temp;
-		if (b > max_seconds) return max_seconds;
+		if (b > max_seconds)
+			return max_seconds;
 	}
 	return std::min(b, max_seconds);
 }
@@ -145,14 +158,12 @@ std::string ParseAndValidateServerDate(const std::string &server_date) {
 
 	// Parse HTTP date - format: "Day, DD Mon YYYY HH:MM:SS GMT"
 	struct tm tm_parsed = {};
-	const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-	                        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
 	int day, year, hour, min, sec;
 	char month_str[4] = {0};
 
-	int parsed = sscanf(server_date.c_str(), "%*[^,], %d %3s %d %d:%d:%d",
-	                    &day, month_str, &year, &hour, &min, &sec);
+	int parsed = sscanf(server_date.c_str(), "%*[^,], %d %3s %d %d:%d:%d", &day, month_str, &year, &hour, &min, &sec);
 
 	if (parsed != 6) {
 		return "";
@@ -226,7 +237,7 @@ std::string GetUrlValidationError(const std::string &url) {
 	}
 
 	// Extract hostname
-	size_t scheme_end = has_https ? 8 : 7;  // strlen("https://") or strlen("http://")
+	size_t scheme_end = has_https ? 8 : 7; // strlen("https://") or strlen("http://")
 	size_t host_end = url.find('/', scheme_end);
 	if (host_end == std::string::npos) {
 		host_end = url.find('?', scheme_end);
@@ -257,7 +268,7 @@ std::string GetUrlValidationError(const std::string &url) {
 		}
 	}
 
-	return "";  // Valid
+	return ""; // Valid
 }
 
 bool IsValidCrawlUrl(const std::string &url) {
@@ -421,8 +432,10 @@ bool ContentTypeMatches(const std::string &content_type, const std::string &patt
 		ct = ct.substr(0, semicolon);
 	}
 	// Trim whitespace
-	while (!ct.empty() && std::isspace(ct.back())) ct.pop_back();
-	while (!ct.empty() && std::isspace(ct.front())) ct.erase(ct.begin());
+	while (!ct.empty() && std::isspace(ct.back()))
+		ct.pop_back();
+	while (!ct.empty() && std::isspace(ct.front()))
+		ct.erase(ct.begin());
 
 	// Convert both to lowercase
 	std::string ct_lower = ct;
@@ -439,8 +452,7 @@ bool ContentTypeMatches(const std::string &content_type, const std::string &patt
 	return ct_lower == pat_lower;
 }
 
-bool IsContentTypeAcceptable(const std::string &content_type,
-                             const std::string &accept_types,
+bool IsContentTypeAcceptable(const std::string &content_type, const std::string &accept_types,
                              const std::string &reject_types) {
 	if (accept_types.empty() && reject_types.empty()) {
 		return true;
@@ -452,8 +464,10 @@ bool IsContentTypeAcceptable(const std::string &content_type,
 		std::istringstream accept_stream(accept_types);
 		std::string pattern;
 		while (std::getline(accept_stream, pattern, ',')) {
-			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
-			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
+			while (!pattern.empty() && std::isspace(pattern.back()))
+				pattern.pop_back();
+			while (!pattern.empty() && std::isspace(pattern.front()))
+				pattern.erase(pattern.begin());
 			if (ContentTypeMatches(content_type, pattern)) {
 				accepted = true;
 				break;
@@ -469,8 +483,10 @@ bool IsContentTypeAcceptable(const std::string &content_type,
 		std::istringstream reject_stream(reject_types);
 		std::string pattern;
 		while (std::getline(reject_stream, pattern, ',')) {
-			while (!pattern.empty() && std::isspace(pattern.back())) pattern.pop_back();
-			while (!pattern.empty() && std::isspace(pattern.front())) pattern.erase(pattern.begin());
+			while (!pattern.empty() && std::isspace(pattern.back()))
+				pattern.pop_back();
+			while (!pattern.empty() && std::isspace(pattern.front()))
+				pattern.erase(pattern.begin());
 			if (ContentTypeMatches(content_type, pattern)) {
 				return false;
 			}
