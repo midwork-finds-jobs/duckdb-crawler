@@ -1,6 +1,6 @@
 # name: test/sql/crawl.test
 # description: Test crawl() bare (source mode) and in LATERAL joins
-# group: [crawler]
+# group: [sql]
 
 require crawler
 

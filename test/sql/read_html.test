@@ -1,6 +1,6 @@
 # name: test/sql/read_html.test
 # description: Test read_html() table function
-# group: [crawler]
+# group: [sql]
 
 require crawler
 

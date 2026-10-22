@@ -1,6 +1,6 @@
 # name: test/sql/crawling_merge.test
 # description: Test CRAWLING MERGE INTO with MERGE semantics (uses DuckDB's MERGE parser)
-# group: [crawler]
+# group: [sql]
 
 require crawler
 
