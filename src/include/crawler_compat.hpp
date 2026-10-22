@@ -7,6 +7,7 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/tableref.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/function/table_function.hpp"
 
 #if CRAWLER_DUCKDB_V2
 #include "duckdb/common/identifier.hpp"
@@ -51,6 +52,16 @@ inline const ParsedExpression *CrawlerComparisonRight(const ComparisonExpression
 	return expression.right.get();
 }
 #endif
+
+//! Declare an optional named parameter. DuckDB 2.0 treats a keyword parameter without a default as required,
+//! so it gets a NULL default that bind callbacks skip.
+inline void CrawlerAddNamedParameter(TableFunction &function, const string &name, const LogicalType &type) {
+#if CRAWLER_DUCKDB_V2
+	function.GetSignature().AddKeywordOnly(Identifier(name), type, Value(type));
+#else
+	function.named_parameters[name] = type;
+#endif
+}
 
 inline string CrawlerTableAlias(const TableRef &ref) {
 	return CrawlerIdentifierName(ref.alias);
